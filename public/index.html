@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>Curriculum Finder</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <h1>Curriculum Finder</h1>
+      <p class="sub"><span id="center"></span><span id="libinfo">Loading the library…</span></p>
+    </div>
+  </header>
+
+  <main class="wrap" id="main">
+    <form id="searchForm" class="search" role="search">
+      <input id="q" type="search" autocomplete="off" spellcheck="false" aria-label="Search the curriculum"
+             placeholder="A topic, a skill or a code, like “adding fractions” or PK-0186">
+      <button type="submit" class="primary">Search</button>
+      <label class="button" for="img" id="imgLabel">Search by image</label>
+      <input id="img" type="file" accept="image/*" class="visually-hidden">
+    </form>
+    <p class="hint">You can also paste or drop a picture of notes, an example problem or a page.</p>
+
+    <section id="reading" class="reading" hidden aria-live="polite">
+      <img id="thumb" alt="The uploaded image">
+      <div>
+        <p id="readingText"></p>
+        <div id="readingChips" class="chips"></div>
+        <button type="button" id="clearImage" class="link">Clear the image</button>
+      </div>
+    </section>
+
+    <fieldset class="filters">
+      <legend class="visually-hidden">Filters</legend>
+      <div id="typeBoxes" class="types"></div>
+      <label>Topic <select id="tag"><option value="">All topics</option></select></label>
+      <label>Level <select id="level"><option value="">Any level</option></select></label>
+      <button type="button" id="clearFilters" class="link">Clear filters</button>
+    </fieldset>
+
+    <p id="status" class="status" role="status"></p>
+    <ol id="results" class="results"></ol>
+    <button type="button" id="more" class="button more" hidden>Show more</button>
+
+    <section id="welcome" class="welcome">
+      <h2>Try a search</h2>
+      <div class="chips" id="examples"></div>
+      <p>Searches look at each document's title, critical skills, keywords and topic, so plain words work:
+        “dividing” also finds “division” and “quotient”. A code like <code>pk 186</code> or
+        <code>FO-0023</code> goes straight to that document.</p>
+    </section>
+  </main>
+</body>
+</html>
