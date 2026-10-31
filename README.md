@@ -14,9 +14,10 @@ library (`tests/sample_library.json`).
 - **Who can open it:** only the staff emails on a Cloudflare Access list, each signing
   in with a one-time code emailed to them. Everyone else gets a sign-in screen and
   never sees the page, the library or a PDF.
-- **Image search:** the photo goes to Anthropic's API (Claude Haiku), which says what
-  math it shows; that becomes the search. Nothing is saved, neither the image nor the
-  reading.
+- **Image search:** a vision model says what math the photo shows, and that becomes
+  the search. By default it's Gemma 4 on Cloudflare Workers AI (free within a daily
+  allowance; the photo stays inside Cloudflare); Claude can be used instead with an
+  API key. Nothing is saved, neither the image nor the reading.
 
 ## How it works
 
@@ -30,7 +31,7 @@ staff browser ──► Cloudflare Access (email + one-time code)
                        ├─ library      GET  library.json ─┐
                        ├─ pdfs         GET  which codes have a PDF
                        ├─ pdf/<code>   GET  one PDF ──────┼──► private R2 bucket
-                       └─ read-image   POST a photo ──► Anthropic API
+                       └─ read-image   POST a photo ──► Workers AI (or Anthropic API)
 ```
 
 - **Search runs in the browser.** The page loads the library once (about 900 KB,
@@ -74,8 +75,9 @@ There is no build step and nothing to install to run the site.
 
 ## Setup (one time)
 
-You need free accounts at GitHub, Cloudflare and the Claude Console. Below,
-`<project>` is your Pages project name and `<bucket>` your R2 bucket name.
+You need free accounts at GitHub and Cloudflare (and the Claude Console only if you
+choose Claude for image search). Below, `<project>` is your Pages project name and
+`<bucket>` your R2 bucket name.
 
 ### 1. GitHub
 
@@ -122,15 +124,18 @@ or text pulled out of them; `.gitignore` keeps them out if you use git.
 
 To add or remove staff later, edit the `Staff` policy. No upload is needed.
 
-### 4. Claude Console: the image reader's key
+### 4. Image search: Workers AI (free)
 
-1. Sign in at **platform.claude.com**. The API is billed separately from a Claude
-   subscription: under **Billing**, add a small amount of credit ($5 lasts a long
-   time, see Costs).
-2. **Settings → Workspaces → Create workspace**, named `Curriculum Finder`. Select it,
-   open **Spend limits**, and set a monthly cap (for example $5). The finder can never
-   spend past it.
-3. **API keys → Create key** in that workspace. Copy it once; it isn't shown again.
+**Workers & Pages → `<project>` → Settings → Bindings → Add → Workers AI**, variable
+name `AI`, for **Production**. That's all: no account, key or card. The reader uses
+Gemma 4 (`@cf/google/gemma-4-26b-a4b-it`); set `AI_MODEL` in step 5 to use another
+Workers AI vision model.
+
+*Or Claude instead* (paid per image, better on messy handwriting): sign in at
+**platform.claude.com**, add a little credit under **Billing** (the API is billed
+separately from a Claude subscription), create a workspace named `Curriculum Finder`
+with a monthly **Spend limit**, and create an API key in it. Add it in step 5 as
+`ANTHROPIC_API_KEY`. When the key is set, it's used instead of Workers AI.
 
 ### 5. Cloudflare Pages: the settings
 
@@ -139,10 +144,11 @@ for **Production**:
 
 | Name | Type | Value |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | **Secret** | the key from step 4 |
 | `ACCESS_TEAM_DOMAIN` | Text | your team domain, like `yourteam.cloudflareaccess.com` |
 | `ACCESS_AUD` | Text | the AUD tag from step 3 |
-| `MODEL` | Text | *optional*; leave it out for `claude-haiku-5-5` |
+| `AI_MODEL` | Text | *optional*; another Workers AI vision model |
+| `ANTHROPIC_API_KEY` | **Secret** | *only for Claude*: the key from step 4 |
+| `MODEL` | Text | *optional, Claude only*; leave it out for `claude-haiku-5-5` |
 
 Settings take effect on the next deployment: **Deployments →** the latest one **→
 Retry deployment**.
@@ -273,10 +279,14 @@ and nothing is redeployed.
 - **R2:** free within 10 GB stored, 1 million writes and listings and 10 million reads
   a month, and R2 never charges for downloads. A library of about 1,200 PDFs is
   around 0.5 GB; the first upload is about 1,200 writes.
-- **Image reading:** the page shrinks each photo before sending it. With Haiku, one
-  image costs about **$0.0005**, so **roughly 2,000 image searches per $1**. With
-  `MODEL` set to `claude-sonnet-5-5` (better on messy handwriting) it's about 20 times
-  that. The workspace spend limit caps either one.
+- **Image reading with Workers AI:** free within Workers AI's daily allowance (10,000
+  "neurons" a day on the free plan). A photo read by Gemma 4 uses a small fraction of
+  that, so a center's searches fit comfortably; once the day's allowance is used up,
+  image search says so until the next day, and typed search keeps working.
+- **Image reading with Claude:** the page shrinks each photo before sending it. With
+  Haiku, one image costs about **$0.0005**, so **roughly 2,000 image searches per $1**.
+  With `MODEL` set to `claude-sonnet-5-5` it's about 20 times that. The workspace spend
+  limit caps either one.
 - **GitHub:** free, public or private.
 
 ## Privacy and security
@@ -284,11 +294,12 @@ and nothing is redeployed.
 - No student information is in the library or the page. Image search sends only the
   photo; don't photograph anything with a student's full name on it. The reader is
   told never to repeat names, and nothing is stored.
-- Secrets live only in Cloudflare: the Anthropic key as a secret in the Pages
-  settings, nothing in this repo or the browser. The R2 upload key is used only on
+- Secrets live only in Cloudflare: the Anthropic key (if used) as a secret in the
+  Pages settings, nothing in this repo or the browser. With Workers AI there is no
+  key at all, and the photo doesn't leave Cloudflare. The R2 upload key is used only on
   the center's computer, from the PowerShell window, and never saved.
 - Every route verifies the Access sign-in token itself before reading the bucket or
-  spending the key (see How it works).
+  running a model (see How it works).
 - The bucket has no public address. The PDF route looks up only document codes and
   answers `noindex`; the library route answers only `library.json`.
 - `public/_headers` stops the page from contacting any other site, keeps it out of
