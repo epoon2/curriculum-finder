@@ -220,11 +220,18 @@ export function search(index, query, options = {}) {
   return results.filter((r) => r.score >= floor).slice(0, limit);
 }
 
-/** The query to run for what the image reader saw. */
-export function queryFromReading(reading) {
-  const parts = [...(reading.skills || []), ...(reading.keywords || [])];
+/** The query to run for what the image reader saw in one image or several (repeats dropped). */
+export function queryFromReadings(readings) {
+  const seen = new Set(), parts = [];
+  for (const r of readings) {
+    for (const part of [...(r.skills || []), ...(r.keywords || [])]) {
+      const key = String(part).toLowerCase();
+      if (!seen.has(key)) { seen.add(key); parts.push(part); }
+    }
+  }
   return parts.join(', ');
 }
+export const queryFromReading = (reading) => queryFromReadings([reading]);
 
 /**
  * Where a document opens in the curriculum system: the library's docUrl pattern

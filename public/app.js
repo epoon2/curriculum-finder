@@ -1,11 +1,11 @@
 /*
   The Curriculum Finder page: loads the library from /api/library (private, staff
-  sign-in only), searches it as you type, and turns an uploaded image into a search
-  through /api/read-image. Everything is
-  built with textContent, never innerHTML, so nothing in the library or the
-  reader's reply can run as code here.
+  sign-in only), searches it as you type, and turns pictures (chosen, pasted or
+  dropped) into a search through /api/read-image. Everything is built with
+  textContent, never innerHTML, so nothing in the library or the reader's reply can
+  run as code here.
 */
-import { buildIndex, search, terms, queryFromReading, docLink } from './search.js';
+import { buildIndex, search, terms, queryFromReadings, docLink } from './search.js';
 
 const PAGE = 25;
 const MAX_EDGE = 2000;           // images are shrunk to this long edge before upload
@@ -27,7 +27,7 @@ const el = (tag, attrs = {}, ...children) => {
   return node;
 };
 
-const state = { index: null, results: [], shown: 0, boostTags: [], imageUrl: '', pdfs: new Set(),
+const state = { index: null, results: [], shown: 0, boostTags: [], pdfs: new Set(),
   platform: 'the curriculum system', docUrl: '' };
 
 async function loadLibrary() {
@@ -159,6 +159,19 @@ function card(doc, matched) {
 }
 
 /* --- image search --------------------------------------------------------------- */
+/*
+  Up to MAX_IMAGES pictures at once, from the file picker, Ctrl+V, the Paste image
+  button or a drop. Each is shrunk here and read on its own (two at a time), so one
+  bad photo doesn't spoil the rest. One new picture searches for itself; several
+  added together search all together. Clicking a picture searches just that one.
+*/
+const MAX_IMAGES = 6;
+const READERS_AT_ONCE = 2;
+let nextShot = 1;
+state.shots = [];       // { id, url, file, status: reading|done|error, reading, error }
+state.active = null;    // the picture the search is for: an id, 'all', or null
+
+const imageFiles = (list) => [...(list || [])].filter((f) => f && /^image\//.test(f.type || ''));
 
 async function shrink(file) {
   const bitmap = await createImageBitmap(file);
@@ -177,21 +190,26 @@ async function shrink(file) {
     reader.onerror = () => reject(new Error('The image could not be read.'));
     reader.readAsDataURL(blob);
   });
-  return { blob, data: String(dataUrl).split(',')[1] };
+  return String(dataUrl).split(',')[1];
 }
 
-async function searchByImage(file) {
-  if (!file || !/^image\//.test(file.type || 'image/')) {
-    $('status').textContent = 'That is not an image.';
-    return;
-  }
-  $('status').textContent = 'Reading the image…';
-  $('imgLabel').classList.add('busy');
+// At most READERS_AT_ONCE readings run at the same time; the rest wait their turn.
+let running = 0;
+const waiting = [];
+function schedule(task) {
+  return new Promise((resolve) => {
+    const start = () => {
+      running++;
+      task().finally(() => { running--; resolve(); const next = waiting.shift(); if (next) next(); });
+    };
+    if (running < READERS_AT_ONCE) start(); else waiting.push(start);
+  });
+}
+
+async function readShot(shot) {
+  if (!state.shots.includes(shot)) return;           // removed while waiting
   try {
-    const { blob, data } = await shrink(file);
-    if (state.imageUrl) URL.revokeObjectURL(state.imageUrl);
-    state.imageUrl = URL.createObjectURL(blob);
-    $('thumb').src = state.imageUrl;
+    const data = await shrink(shot.file);
     const res = await fetch('api/read-image', {
       method: 'POST',
       credentials: 'same-origin',
@@ -202,41 +220,128 @@ async function searchByImage(file) {
     if (!type.includes('json')) throw new Error('Your sign-in may have expired. Reload the page and try again.');
     const reply = await res.json();
     if (!res.ok) throw new Error(reply.error || 'The image could not be read.');
-    showReading(reply.reading);
+    shot.reading = reply.reading;
+    shot.status = 'done';
   } catch (err) {
-    $('status').textContent = err.message || 'The image could not be read.';
-  } finally {
-    $('imgLabel').classList.remove('busy');
-    $('img').value = '';
+    shot.status = 'error';
+    shot.error = err.message || 'The image could not be read.';
   }
+  shot.file = null;
+  renderShots();
 }
 
-function showReading(reading) {
-  $('reading').hidden = false;
-  const chips = $('readingChips');
-  chips.replaceChildren();
-  if (!reading.readable) {
-    $('readingText').textContent = 'No math found in that image. Try a clearer or closer photo.';
-    state.boostTags = [];
+function addImages(list) {
+  const files = imageFiles(list);
+  if (!files.length) { $('status').textContent = 'That is not an image.'; return; }
+  const room = MAX_IMAGES - state.shots.length;
+  if (room <= 0) {
+    $('status').textContent = `Up to ${MAX_IMAGES} images at a time. Remove one, or clear them, first.`;
     return;
   }
-  $('readingText').textContent = reading.summary || 'Read the image.';
-  state.boostTags = reading.topics || [];
-  for (const t of reading.topics || []) chips.append(el('span', { class: 'chip tag' }, t));
-  for (const s of reading.skills || []) {
-    chips.append(el('button', { type: 'button', class: 'chip', title: 'Search just this skill',
-      onclick: () => { $('q').value = s; run(); } }, s));
+  const added = files.slice(0, room).map((file) => ({
+    id: nextShot++, file, url: URL.createObjectURL(file), status: 'reading', reading: null, error: '' }));
+  state.shots.push(...added);
+  $('status').textContent = files.length > room ? `Only the first ${room} were added (up to ${MAX_IMAGES} at a time).` : '';
+  renderShots();
+  Promise.all(added.map((shot) => schedule(() => readShot(shot)))).then(() => {
+    const ok = added.filter((s) => state.shots.includes(s) && s.reading && s.reading.readable);
+    if (ok.length === 1) choose(ok[0].id);
+    else if (ok.length > 1) choose('all');
+  });
+}
+
+async function pasteFromClipboard() {
+  if (!navigator.clipboard || !navigator.clipboard.read) {
+    $('status').textContent = 'Press Ctrl+V (⌘V on a Mac) to paste an image.';
+    return;
   }
-  $('q').value = queryFromReading(reading);
+  try {
+    const files = [];
+    for (const item of await navigator.clipboard.read()) {
+      const type = item.types.find((t) => t.startsWith('image/'));
+      if (type) files.push(new File([await item.getType(type)], 'pasted image', { type }));
+    }
+    if (files.length) addImages(files);
+    else $('status').textContent = 'There is no image on the clipboard. Copy one first.';
+  } catch {
+    $('status').textContent = 'The browser did not allow reading the clipboard. Press Ctrl+V (⌘V on a Mac) instead.';
+  }
+}
+
+function clipboardImages(data) {
+  if (!data) return [];
+  const files = imageFiles(data.files);
+  if (files.length) return files;
+  return [...(data.items || [])].filter((i) => i.kind === 'file' && /^image\//.test(i.type))
+    .map((i) => i.getAsFile()).filter(Boolean);
+}
+
+/** Search for one picture (its id), all of them ('all'), or none (null). */
+function choose(which) {
+  const readable = state.shots.filter((s) => s.reading && s.reading.readable);
+  const picked = which === 'all' ? readable : readable.filter((s) => s.id === which);
+  if (!picked.length) { state.active = null; state.boostTags = []; renderShots(); return; }
+  state.active = picked.length === 1 ? picked[0].id : 'all';
+  const readings = picked.map((s) => s.reading);
+  state.boostTags = [...new Set(readings.flatMap((r) => r.topics || []))];
+  $('q').value = queryFromReadings(readings);
+  renderShots();
   run();
 }
 
-function clearImage() {
-  $('reading').hidden = true;
+function removeShot(id) {
+  const shot = state.shots.find((s) => s.id === id);
+  if (!shot) return;
+  URL.revokeObjectURL(shot.url);
+  state.shots = state.shots.filter((s) => s !== shot);
+  if (!state.shots.length) { clearImages(); return; }
+  if (state.active === id || state.active === 'all') choose('all');   // whatever is left
+  else renderShots();
+}
+
+function clearImages() {
+  for (const s of state.shots) URL.revokeObjectURL(s.url);
+  state.shots = [];
+  state.active = null;
   state.boostTags = [];
-  if (state.imageUrl) URL.revokeObjectURL(state.imageUrl);
-  state.imageUrl = '';
+  renderShots();
   run();
+}
+
+function shotCard(shot, n) {
+  const r = shot.reading;
+  const readable = Boolean(r && r.readable);
+  const active = state.active === shot.id || (state.active === 'all' && readable);
+  const text = shot.status === 'reading' ? 'Reading…'
+    : shot.status === 'error' ? shot.error
+    : readable ? (r.summary || 'Read the image.')
+    : 'No math found in this picture. Try a clearer or closer photo.';
+  const pick = () => choose(shot.id);
+  const img = el('img', { src: shot.url, alt: `Picture ${n}` });
+  const chips = readable ? el('div', { class: 'chips' },
+    ...(r.topics || []).map((t) => el('span', { class: 'chip tag' }, t)),
+    ...(r.skills || []).map((skill) => el('button', { type: 'button', class: 'chip', title: 'Search just this skill',
+      onclick: () => { state.active = null; state.boostTags = r.topics || []; $('q').value = skill; renderShots(); run(); } },
+    skill))) : null;
+  return el('li', { class: 'shot' + (active ? ' active' : '') + (shot.status === 'error' ? ' failed' : '') },
+    readable ? el('button', { type: 'button', class: 'shot-pick', title: 'Search for this picture', onclick: pick }, img) : img,
+    el('div', { class: 'shot-body' },
+      readable ? el('button', { type: 'button', class: 'link shot-text', title: 'Search for this picture', onclick: pick }, text)
+        : el('p', { class: 'shot-text' }, text),
+      chips),
+    el('button', { type: 'button', class: 'shot-remove', title: 'Remove this picture', 'aria-label': `Remove picture ${n}`,
+      onclick: () => removeShot(shot.id) }, '×'));
+}
+
+function renderShots() {
+  $('reading').hidden = !state.shots.length;
+  $('readings').replaceChildren(...state.shots.map((s, i) => shotCard(s, i + 1)));
+  const readable = state.shots.filter((s) => s.reading && s.reading.readable).length;
+  const reading = state.shots.filter((s) => s.status === 'reading').length;
+  $('searchAll').hidden = readable < 2;
+  $('searchAll').setAttribute('aria-pressed', String(state.active === 'all'));
+  $('readingNote').textContent = reading ? `Reading ${reading} picture${reading === 1 ? '' : 's'}…`
+    : readable > 1 ? 'Click a picture to search for just that one.' : '';
 }
 
 /* --- wiring ------------------------------------------------------------------- */
@@ -251,11 +356,13 @@ function wire() {
     $('tag').value = ''; $('level').value = '';
     run();
   });
-  $('clearImage').addEventListener('click', clearImage);
-  $('img').addEventListener('change', (e) => searchByImage(e.target.files[0]));
+  $('clearImage').addEventListener('click', clearImages);
+  $('searchAll').addEventListener('click', () => choose('all'));
+  $('pasteImage').addEventListener('click', pasteFromClipboard);
+  $('img').addEventListener('change', (e) => { addImages(e.target.files); e.target.value = ''; });
   document.addEventListener('paste', (e) => {
-    const file = [...(e.clipboardData?.files || [])].find((f) => f.type.startsWith('image/'));
-    if (file) { e.preventDefault(); searchByImage(file); }
+    const files = clipboardImages(e.clipboardData);
+    if (files.length) { e.preventDefault(); addImages(files); }
   });
   const main = $('main');
   main.addEventListener('dragover', (e) => { e.preventDefault(); main.classList.add('dropping'); });
@@ -263,8 +370,8 @@ function wire() {
   main.addEventListener('drop', (e) => {
     e.preventDefault();
     main.classList.remove('dropping');
-    const file = [...(e.dataTransfer?.files || [])].find((f) => f.type.startsWith('image/'));
-    if (file) searchByImage(file);
+    const files = imageFiles(e.dataTransfer?.files);
+    if (files.length) addImages(files);
   });
   document.addEventListener('keydown', (e) => {
     if (e.key === '/' && document.activeElement !== $('q')) { e.preventDefault(); $('q').focus(); }

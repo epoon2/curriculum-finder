@@ -22,17 +22,20 @@
              placeholder="A topic, a skill or a code, like “adding fractions” or PK-0186">
       <button type="submit" class="primary">Search</button>
       <label class="button" for="img" id="imgLabel">Search by image</label>
-      <input id="img" type="file" accept="image/*" class="visually-hidden">
+      <button type="button" class="button" id="pasteImage">Paste image</button>
+      <input id="img" type="file" accept="image/*" multiple class="visually-hidden">
     </form>
-    <p class="hint">You can also paste or drop a picture of notes, an example problem or a page.</p>
+    <p class="hint">Paste (Ctrl+V), drop or choose pictures of notes, example problems or pages, up to 6 at a time.</p>
 
     <section id="reading" class="reading" hidden aria-live="polite">
-      <img id="thumb" alt="The uploaded image">
-      <div>
-        <p id="readingText"></p>
-        <div id="readingChips" class="chips"></div>
-        <button type="button" id="clearImage" class="link">Clear the image</button>
+      <div class="reading-head">
+        <p id="readingNote" class="muted"></p>
+        <div class="reading-actions">
+          <button type="button" id="searchAll" class="chip" aria-pressed="false" hidden>Search all together</button>
+          <button type="button" id="clearImage" class="link">Clear images</button>
+        </div>
       </div>
+      <ul id="readings" class="readings"></ul>
     </section>
 
     <fieldset class="filters">
