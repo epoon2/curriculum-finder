@@ -1,0 +1,17 @@
+# The curriculum is licensed: none of it goes in this repo. The library export,
+# library.json built from it, the PDFs and anything pulled out of them stay on the
+# center's computer and in the private bucket.
+*.xlsx
+*.xls
+*.csv
+library.json
+*.pdf
+*.zip
+curriculum_text_*.jsonl.gz
+# The made-up library the tests use is the one exception.
+!tests/sample_library.json
+
+node_modules/
+.wrangler/
+__pycache__/
+.DS_Store
