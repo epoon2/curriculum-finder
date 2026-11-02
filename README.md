@@ -197,8 +197,16 @@ python upload_curriculum.py "D:\Curriculum PDFs" --dry-run
 `build_library.py` writes `library.json` next to the export and prints counts. The
 dry run uploads nothing and needs no key. It writes `upload_report.csv` next to the
 PDF folder: each file, the code it was read as, and what will happen. Check the lines
-marked **not in the library** (a name read wrong) and **library PK with no PDF found**.
-When a code has more than one file, the highest `_v` number is kept.
+marked **not in the library** (a name read wrong), **library PK with no PDF found** and
+**library WOB with no PDF found**. When a code has more than one file, the highest `_v`
+number is kept.
+
+Workout Book files (names starting `WOB`, `WCH` or `Workout`) usually have no code in
+their names, so they're matched to the library by file name: `WOB_7_Chapter_3.pdf` is
+the library document with that file name (case, spaces, punctuation and a `_v02` ending
+don't matter). A WOB or WCH code in the name, like `WCH-007-003`, wins. A Workout Book
+file whose name isn't in the library shows as **no code in the name, and no library
+document with this file name**; rename it to the file name the library export shows.
 
 Then, in the same PowerShell window (the keys last only until it's closed):
 
@@ -318,4 +326,3 @@ npm run browser-test                  # the page in a real browser (needs Playwr
 They run on `tests/sample_library.json`, a made-up library in the export's format. A
 real `library.json` placed next to this README (it's ignored by git) adds a few
 checks against it.
-

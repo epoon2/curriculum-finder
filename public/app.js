@@ -151,7 +151,7 @@ function card(doc, matched) {
     (doc.tags || []).length ? el('p', { class: 'tags' }, ...doc.tags.map((t) => el('span', { class: 'tag' }, t))) : null,
     el('p', { class: 'actions' },
       // The PDF from the finder's private storage (/api/pdf/<code>, staff sign-in only).
-      state.pdfs.has(doc.code)
+      state.pdfs.has(String(doc.code).toUpperCase())     // the bucket's keys are upper case
         ? el('a', { href: '/api/pdf/' + encodeURIComponent(doc.code), target: '_blank', rel: 'noopener' }, 'Open PDF') : null,
       link ? el('a', { href: link, target: '_blank', rel: 'noopener noreferrer' }, `Open in ${state.platform}`)
         : el('span', { class: 'muted' }, `Look up ${doc.code} in ${state.platform}`),

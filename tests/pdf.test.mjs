@@ -78,6 +78,19 @@ test('only document codes are looked up: no paths, no listing', async () => {
   assert.deepEqual(e.CURRICULUM.asked, []);
 });
 
+test('Workout Book codes are looked up too, upper case', async () => {
+  const objects = { [pdfKey('WCH-007-003')]: PDF, [pdfKey('WOB-0TP-004A')]: PDF,
+    [pdfKey('WOB_PK_SAMPLE_SUPPLEMENT')]: PDF };
+  const e = { ...ACCESS_ENV, CURRICULUM: bucket(objects) };
+  for (const code of ['WCH-007-003', 'wob-0tp-004a', 'WOB_PK_Sample_Supplement']) {
+    const res = await servePdf(await req(code), e, code, fetchImpl);
+    assert.equal(res.status, 200, code);
+  }
+  for (const bad of ['WOB_../x', 'WOB_', 'WOB-007-00000', 'WOB_a.pdf']) {
+    assert.equal((await servePdf(await req('x'), e, bad, fetchImpl)).status, 400, bad);
+  }
+});
+
 test('a code with no PDF uploaded says so; no bucket connected says so', async () => {
   const missing = await servePdf(await req('PK-0000-11'), env(), 'PK-0000-11', fetchImpl);
   assert.equal(missing.status, 404);

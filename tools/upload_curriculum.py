@@ -6,7 +6,11 @@ The finder reads both from the bucket, never from the repo:
 
 A PDF's code comes from its file name, written the way the library writes it:
 "001_PK-NF01-00_Sample_Title_v01.pdf" is PK-NF01-00, "Pk_3102_Sample_Title_v01.pdf"
-is PK-3102-00. When a code has several files (_v01, _v02), the highest version goes up.
+is PK-3102-00. Workout Books (WOB / WCH) mostly have no code in their names, so a
+file whose name starts with WOB, WCH or Workout is found by its name in the library
+("WOB_7_Chapter_3.pdf" is the library document with that file name), unless its name
+has a WOB or WCH code in it. When a code has several files (_v01, _v02), the highest
+version goes up.
 Files already in the bucket are skipped, so it's safe to run again after a break, or
 after adding a few PDFs.
 
@@ -47,6 +51,10 @@ LIBRARY_KEY = 'library.json'
 # the library's letter endings do, so "Pk_3192_Box_Plots" is PK-3192-00, not -BOX.
 CODE = re.compile(r'(?<![A-Z0-9])(PK|FO|GF)[-_ ]?([A-Z0-9]{3,4})(?:([-_ ])([A-Z0-9]{2,3}))?(?![A-Z0-9])')
 WORD_ENDINGS = {'TP', 'HS', 'EP', 'CA'}
+# Workout Book codes, always with hyphens: WOB-007-000 (whole book), WCH-007-003 (a chapter),
+# WOB-NF29-000, WOB-0TP-004A.
+WOB_CODE = re.compile(r'(?<![A-Z0-9])(WOB|WCH)-([A-Z0-9]{3,4})-([A-Z0-9]{3,4})(?![A-Z0-9])')
+WOB_NAME = re.compile(r'\s*(WOB|WCH|WORKOUT)', re.I)
 VERSION = re.compile(r'_V(\d+)(?![A-Z0-9])')
 HERE = Path(__file__).resolve().parent
 LIBRARY = next((p for p in (HERE / 'library.json', HERE.parent / 'library.json') if p.is_file()),
@@ -68,6 +76,42 @@ def code_of(name: str) -> str:
     return f'{kind}-{number}-{ending or "00"}'
 
 
+def name_key(name: str, drop_version: bool = False) -> str:
+    """A file name reduced for matching: no .pdf, no case, no spaces or punctuation."""
+    stem = re.sub(r'\.pdf$', '', str(name or '').strip(), flags=re.I)
+    if drop_version:
+        stem = re.sub(r'[ _-]v\d+$', '', stem, flags=re.I)
+    return re.sub(r'[^a-z0-9]', '', stem.lower())
+
+
+def by_file_name(docs) -> dict:
+    """{name_key: code} for the library's file names that belong to one document only
+    (with and without a _v01 ending)."""
+    found: dict[str, set] = {}
+    for d in docs:
+        for drop in (False, True):
+            key = name_key(d.get('file', ''), drop)
+            if key:
+                found.setdefault(key, set()).add(d['code'])
+    return {key: codes.pop() for key, codes in found.items() if len(codes) == 1}
+
+
+def code_for(name: str, library=None, files=None) -> str:
+    """The library code for a PDF's file name ('' when none is found).
+
+    Workout Book files (names starting WOB, WCH or Workout): a WOB/WCH code in the
+    name, else the library document with that file name; a "PK" in such a name is
+    never read as a PK code. Everything else: the code in the name, else (no code)
+    the library document with that file name."""
+    files = files or {}
+    named = files.get(name_key(name)) or files.get(name_key(name, drop_version=True)) or ''
+    if WOB_NAME.match(name):
+        match = WOB_CODE.search(name.upper())
+        return fit('-'.join(match.groups()), library) if match else named
+    code = code_of(name)
+    return fit(code, library) if code else named
+
+
 def fit(code: str, library) -> str:
     """The library's code for it, when the library has exactly one with that number."""
     if not library or code in library:
@@ -77,10 +121,11 @@ def fit(code: str, library) -> str:
     return same[0] if len(same) == 1 else code
 
 
-def read_library(path):
-    """(library.json's bytes, {code: type}), or (None, None) if there isn't a usable one."""
+def read_library(path, with_files=False):
+    """(library.json's bytes, {code: type}), or (None, None) if there isn't a usable one.
+    With ``with_files``, a third item: by_file_name() of its documents."""
     if not path or not Path(path).is_file():
-        return None, None
+        return (None, None, {}) if with_files else (None, None)
     data = Path(path).read_bytes()
     try:
         docs = json.loads(data.decode('utf-8'))['documents']
@@ -89,7 +134,12 @@ def read_library(path):
         raise SystemExit(f'{path} is not a library.json from build_library.py ({type(exc).__name__}).')
     if not codes:
         raise SystemExit(f'{path} has no documents in it.')
-    return data, codes
+    return (data, codes, by_file_name(docs)) if with_files else (data, codes)
+
+
+def pdf_key(code: str) -> str:
+    """Where a code's PDF goes in the bucket. Upper case, as the finder asks for it."""
+    return f'pdf/{code.upper()}.pdf'
 
 
 def version_of(name: str) -> int:
@@ -97,15 +147,14 @@ def version_of(name: str) -> int:
     return int(match.group(1)) if match else 0
 
 
-def plan(folder: Path, library=None):
+def plan(folder: Path, library=None, files=None):
     """(chosen {code: path}, other files with a taken code [(code, path, kept)], no code [path])."""
     by_code: dict[str, list[Path]] = {}
     no_code = []
     for path in sorted(folder.rglob('*')):
         if not path.is_file() or path.suffix.lower() != '.pdf':
             continue
-        code = code_of(path.name)
-        code = fit(code, library) if code else code
+        code = code_for(path.name, library, files)
         (by_code.setdefault(code, []) if code else no_code).append(path)
     chosen, older = {}, []
     for code, paths in by_code.items():
@@ -145,7 +194,7 @@ def upload_library(client, bucket: str, data: bytes) -> str:
 
 
 def upload_one(client, bucket: str, code: str, path: Path, folder: Path) -> str:
-    key, size = f'pdf/{code}.pdf', path.stat().st_size
+    key, size = pdf_key(code), path.stat().st_size
     try:
         if client.head_object(Bucket=bucket, Key=key).get('ContentLength') == size:
             return 'already there'
@@ -172,7 +221,7 @@ def main(argv=None, client=None) -> int:
     if not args.dry_run and not args.bucket:
         print('Which bucket? Set $env:R2_BUCKET (or give --bucket NAME).')
         return 2
-    data, library = read_library(args.library)
+    data, library, files = read_library(args.library, with_files=True)
     if data is None:
         print(f'No library.json at {args.library}: the finder needs one. Build it with build_library.py,'
               ' or point to it with --library.')
@@ -185,22 +234,28 @@ def main(argv=None, client=None) -> int:
         print(f'library.json: {len(library)} document codes.')
     chosen, older, no_code, unknown = {}, [], [], []
     if folder:
-        chosen, older, no_code = plan(folder, library)
+        chosen, older, no_code = plan(folder, library, files)
         print(f'{len(chosen)} PDFs to upload as pdf/<code>.pdf; {len(older)} more files with a code already taken'
-              f' (older versions, left out); {len(no_code)} PDFs with no code in their name (left out).')
+              f' (older versions, left out); {len(no_code)} PDFs with no code in their name and no'
+              ' match in the library (left out).')
         unknown = sorted(c for c in chosen if library is not None and c not in library)
-        rows += [[code, f'pdf/{code}.pdf', str(p.relative_to(folder)), p.stat().st_size,
+        rows += [[code, pdf_key(code), str(p.relative_to(folder)), p.stat().st_size,
                   'to upload' + (' (not in the library: check the name)' if code in unknown else '')]
                  for code, p in sorted(chosen.items())]
         rows += [[code, '', str(p.relative_to(folder)), p.stat().st_size,
                   f'{"older version of" if version_of(p.name) < version_of(kept.name) else "same code as"} {kept.name} (left out)']
                  for code, p, kept in older]
-        rows += [['', '', str(p.relative_to(folder)), p.stat().st_size, 'no code in the name'] for p in no_code]
+        rows += [['', '', str(p.relative_to(folder)), p.stat().st_size,
+                  'no code in the name, and no library document with this file name'] for p in no_code]
         if library is not None:
             missing = sorted(c for c, t in library.items() if t == 'PK' and c not in chosen)
             rows += [[c, '', '', '', 'library PK with no PDF found'] for c in missing]
+            wobs = [c for c, t in library.items() if t.upper().startswith('WOB')]
+            missing_wobs = sorted(c for c in wobs if c not in chosen)
+            rows += [[c, '', '', '', 'library WOB with no PDF found'] for c in missing_wobs]
             print(f'Library check: {len(unknown)} codes not in the library; '
-                  f'{len(missing)} of its {sum(t == "PK" for t in library.values())} PKs have no PDF here.')
+                  f'{len(missing)} of its {sum(t == "PK" for t in library.values())} PKs and '
+                  f'{len(missing_wobs)} of its {len(wobs)} Workout Book files have no PDF here.')
 
     failed = False
     if not args.dry_run:
@@ -242,7 +297,7 @@ def main(argv=None, client=None) -> int:
     for code, p, kept in older[:5]:
         print(f'  left out: {p.name} (same code, kept {kept.name})')
     for p in no_code[:5]:
-        print(f'  no code in the name: {p.name}')
+        print(f'  no code in the name and no library match: {p.name}')
     for code in unknown[:5]:
         print(f'  not in the library: {code} ({chosen[code].name})')
     return 1 if failed else 0

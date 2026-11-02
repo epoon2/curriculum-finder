@@ -56,6 +56,39 @@ class CodeTest(unittest.TestCase):
         self.assertEqual(u.fit('PK-0186-HS', library), 'PK-0186-HS', 'two candidates: left as read')
         self.assertEqual(u.fit('PK-0186-TP', library), 'PK-0186-TP')
 
+    def test_workout_books_are_found_by_their_library_file_name(self):
+        docs = [{'code': 'WCH-007-003', 'type': 'WOB - Chapters', 'file': 'WOB_7_Chapter_3.pdf'},
+                {'code': 'WOB-NF29-000', 'type': 'WOB - Complete',
+                 'file': 'Workout Book Sample Facts Review'},
+                {'code': 'WOB-0PK-000', 'type': 'WOB - Complete', 'file': 'WOB_PK_Sample_Concepts.pdf'},
+                {'code': 'WOB-0TP-004A', 'type': 'WOB - Complete', 'file': 'WOB_Test_Prep_Level_4.pdf'},
+                {'code': 'PK-0186-00', 'type': 'PK', 'file': 'PK-0186-00_Adding_Fractions.pdf'}]
+        library = {d['code']: d['type'] for d in docs}
+        files = u.by_file_name(docs)
+        for name, code in [
+            ('WOB_7_Chapter_3.pdf', 'WCH-007-003'),
+            ('wob 7 chapter 3.PDF', 'WCH-007-003'),                    # case and spaces don't matter
+            ('WOB_7_Chapter_3_v02.pdf', 'WCH-007-003'),                # nor a version ending
+            ('Workout Book Sample Facts Review.pdf', 'WOB-NF29-000'),
+            ('WOB_PK_Sample_Concepts.pdf', 'WOB-0PK-000'),         # never read as PK-PRE-00
+            ('WCH-007-003_anything.pdf', 'WCH-007-003'),               # a code in the name wins
+            ('WOB-0TP-004A.pdf', 'WOB-0TP-004A'),
+            ('WOB_7_Chapter_9.pdf', ''),                                # not in the library: left out
+            ('PK-0186-00_Adding_Fractions_v02.pdf', 'PK-0186-00'),     # PKs as before
+            ('Adding_Fractions.pdf', ''),
+        ]:
+            self.assertEqual(u.code_for(name, library, files), code, name)
+        self.assertEqual(u.pdf_key('WOB_PK_Sample_Supplement'),
+                         'pdf/WOB_PK_SAMPLE_SUPPLEMENT.pdf')
+
+    @unittest.skipUnless(REAL.is_file(), 'no library.json next to the README')
+    def test_every_real_library_file_name_reads_as_its_own_code(self):
+        data, library, files = u.read_library(REAL, with_files=True)
+        docs = json.loads(data.decode('utf-8'))['documents']
+        name = lambda f: f.replace('/', '-') + ('' if f.lower().endswith('.pdf') else '.pdf')
+        wrong = [(d['code'], d['file']) for d in docs if u.code_for(name(d['file']), library, files) != d['code']]
+        self.assertEqual(wrong, [])
+
     def test_versions(self):
         self.assertEqual(u.version_of('x_v02.pdf'), 2)
         self.assertEqual(u.version_of('x.pdf'), 0)
@@ -116,9 +149,28 @@ class UploadTest(unittest.TestCase):
         self.assertEqual(rows[0]['key'], 'library.json')
         self.assertEqual(status['002_PK-0186-00_Adding_Fractions_v02.pdf'], 'to upload')
         self.assertTrue(status['001_PK-0186-00_Adding_Fractions_v01.pdf'].startswith('older version of'))
-        self.assertEqual(status['notes.pdf'], 'no code in the name')
+        self.assertEqual(status['notes.pdf'], 'no code in the name, and no library document with this file name')
         self.assertIn('not in the library', status['004_PK-9999-99_Not_A_Real_One.pdf'])
         self.assertTrue(any(r['status'] == 'library PK with no PDF found' for r in rows))
+
+    def test_workout_book_files_go_up_under_their_library_codes(self):
+        (self.folder / 'WOB').mkdir()
+        (self.folder / 'WOB' / 'WCH-007-002_Workout_Book_7_Chapter_2_Decimals.pdf').write_bytes(b'%PDF ch2')
+        (self.folder / 'WOB' / 'Workout Book 8.pdf').write_bytes(b'%PDF book 8')     # no code, no match
+        lib = json.loads(self.library.read_text(encoding='utf-8'))
+        for d in lib['documents']:
+            if d['code'] == 'WOB-008-000':
+                d['file'] = 'Workout_Book_8.pdf'          # named like the real ones: no code
+        self.library.write_text(json.dumps(lib), encoding='utf-8')
+        code, out = self.run_main('--dry-run')
+        self.assertEqual(code, 0, out)
+        rows = {r['file'].split('/')[-1]: r for r in self.report() if r['file']}
+        self.assertEqual(rows['WCH-007-002_Workout_Book_7_Chapter_2_Decimals.pdf']['key'], 'pdf/WCH-007-002.pdf')
+        self.assertEqual(rows['Workout Book 8.pdf']['key'], 'pdf/WOB-008-000.pdf')
+        missing = [r['code'] for r in self.report() if r['status'] == 'library WOB with no PDF found']
+        self.assertIn('WCH-007-001', missing)
+        self.assertNotIn('WCH-007-002', missing)
+        self.assertIn('Workout Book files have no PDF here', out)
 
     def test_a_real_run_needs_a_bucket(self):
         code, out = self.run_main(client=FakeBucket())
