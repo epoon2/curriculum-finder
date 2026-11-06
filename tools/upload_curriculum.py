@@ -86,28 +86,85 @@ def name_key(name: str, drop_version: bool = False) -> str:
 
 def by_file_name(docs) -> dict:
     """{name_key: code} for the library's file names that belong to one document only
-    (with and without a _v01 ending)."""
-    found: dict[str, set] = {}
+    (with and without a _v01 ending), plus {('part', book, part, chapter): code} for
+    Workout Book chapters whose titles number them within a part ("WOB B Part 2
+    Chapter 1"); chapter 'DT' is that part's DeskTools."""
+    found: dict = {}
     for d in docs:
         for drop in (False, True):
             key = name_key(d.get('file', ''), drop)
             if key:
                 found.setdefault(key, set()).add(d['code'])
+        book = re.match(r'WCH-([A-Z0-9]{3})-', d.get('code', ''))
+        part = re.search(r'\bPart (\d+)\b', d.get('title', ''), re.I)
+        if book and part:
+            chapter = re.search(r'\bChapter (\d+)\b', d['title'], re.I)
+            if re.search(r'desk ?tools', d['title'], re.I):
+                found.setdefault(('part', book.group(1), int(part.group(1)), 'DT'), set()).add(d['code'])
+            elif chapter:
+                found.setdefault(('part', book.group(1), int(part.group(1)), int(chapter.group(1))),
+                                 set()).add(d['code'])
     return {key: codes.pop() for key, codes in found.items() if len(codes) == 1}
+
+
+# Short Workout Book chapter names, as saved on the center's computer:
+# WOB_7_Ch3_v21, WOB_M2_Ch4_v07, WOB_A_Ch1, WOB_Alg_Chapter_1, WOB_B_Part_2_Ch_3,
+# WOB_B_Part_2_DT, WOB_D_L1_Pt2, WOB_NF_Ch_1, WOB_PK1_Ch1, WOB_SAT_Basic_Skills_Ch_1.
+SHORT_WOB = re.compile(r"""^WOB[ _-]+
+    (?P<book>\d{1,2}|M\d{1,2}|ALG(?:EBRA)?|GEO(?:METRY)?|NF|PK\d?|SAT(?:[ _-]+BASIC[ _-]+SKILLS)?|[A-Z])
+    (?:[ _-]+L(?:EVEL)?[ _-]*(?P<level>\d))?
+    (?:[ _-]+(?:PART|PT)[ _-]*(?P<part>\d)(?=[ _-]+(?:CH|DT|DESK)))?
+    [ _-]+(?:(?:CHAPTER|CH|PART|PT)[ _-]*(?P<chapter>\d{1,2})|(?P<desk>DT|DESK[ _-]?TOOLS))$""", re.X)
+
+
+def book_segment(book: str, level) -> str:
+    """The middle of a WCH code: 7 -> 007, A -> 00A, M2 -> N02, D level 1 -> 0D1,
+    Algebra -> 010, Geometry -> 011, NF -> 0NF, PK -> 0PK, SAT -> SAT."""
+    if book.isdigit():
+        return f'{int(book):03d}'
+    if re.fullmatch(r'M\d{1,2}', book):
+        return f'N{int(book[1:]):02d}'
+    if book == 'D' and level:
+        return f'0D{level}'
+    if len(book) == 1:
+        return f'00{book}'
+    return {'ALG': '010', 'GEO': '011', 'NF': '0NF', 'PK': '0PK', 'SAT': 'SAT'}.get(book[:3].rstrip('0123456789'), '')
+
+
+def short_wob_code(name: str, files) -> str:
+    """The WCH code for a short Workout Book chapter name, or ''."""
+    stem = re.sub(r'\.PDF$', '', name.strip().upper())
+    stem = re.sub(r'_{2,}MIXED.*$', '', stem)              # WOB_3_Ch3_v06__MIXED_v06_v07
+    stem = re.sub(r'[ _-]V\d+$', '', stem)
+    match = SHORT_WOB.match(stem)
+    if not match:
+        return ''
+    book = book_segment(re.split(r'[ _-]', match['book'])[0], match['level'])
+    if not book:
+        return ''
+    if match['part']:
+        return files.get(('part', book, int(match['part']), 'DT' if match['desk'] else int(match['chapter'])), '')
+    return f'WCH-{book}-{int(match["chapter"]):03d}' if match['chapter'] else ''
 
 
 def code_for(name: str, library=None, files=None) -> str:
     """The library code for a PDF's file name ('' when none is found).
 
     Workout Book files (names starting WOB, WCH or Workout): a WOB/WCH code in the
-    name, else the library document with that file name; a "PK" in such a name is
-    never read as a PK code. Everything else: the code in the name, else (no code)
-    the library document with that file name."""
+    name, else the library document with that file name, else a short chapter name
+    (WOB_7_Ch3_v21 is WCH-007-003) when the library has that code; a "PK" in such a
+    name is never read as a PK code. Everything else: the code in the name, else (no
+    code) the library document with that file name."""
     files = files or {}
     named = files.get(name_key(name)) or files.get(name_key(name, drop_version=True)) or ''
     if WOB_NAME.match(name):
         match = WOB_CODE.search(name.upper())
-        return fit('-'.join(match.groups()), library) if match else named
+        if match:
+            return fit('-'.join(match.groups()), library)
+        if named:
+            return named
+        short = short_wob_code(name, files)
+        return short if short and (library is None or short in library) else ''
     code = code_of(name)
     return fit(code, library) if code else named
 
