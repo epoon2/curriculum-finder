@@ -8,6 +8,8 @@ library.json
 *.pdf
 *.zip
 curriculum_text_*.jsonl.gz
+text.json.gz
+text.json
 # The made-up library the tests use is the one exception.
 !tests/sample_library.json
 
