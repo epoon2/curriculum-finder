@@ -1,5 +1,6 @@
 """tools/upload_curriculum.py with a stand-in bucket:  python3 -m unittest discover tests"""
 import csv
+import gzip
 import hashlib
 import io
 import json
@@ -243,6 +244,62 @@ class UploadTest(unittest.TestCase):
         self.library.write_text('{"not": "a library"}', encoding='utf-8')
         with self.assertRaises(SystemExit):
             self.run_main('--dry-run')
+
+    def write_text(self, where, records, name='curriculum_text_1.jsonl.gz'):
+        path = where / name
+        with gzip.open(path, 'wt', encoding='utf-8') as f:
+            for file, pages in records:
+                f.write(json.dumps({'file': file, 'path': 'x/' + file, 'code': '', 'pages': len(pages), 'text': pages}) + '\n')
+        return path
+
+    TEXTS = [('001_PK-0186-00_Adding_Fractions_v01.pdf', ['old page']),
+             ('002_PK-0186-00_Adding_Fractions_v02.pdf', ['page one', 'page two']),     # the newest version wins
+             ('003_Pk_3145_Slope_v01.pdf', ['slope page']),
+             ('004_PK-9999-99_Not_A_Real_One.pdf', ['?']),                             # not in the library
+             ('notes.pdf', ['no code'])]
+
+    def test_the_pdfs_text_is_filed_under_the_codes_the_pdfs_go_up_as(self):
+        path = self.write_text(self.folder, self.TEXTS)
+        _, library, files = u.read_library(self.library, with_files=True)
+        data, counts = u.build_text([path], library, files)
+        self.assertEqual(json.loads(gzip.decompress(data)),
+                         {'documents': {'PK-0186-00': ['page one', 'page two'], 'PK-3145-00': ['slope page']}})
+        self.assertEqual((counts['documents'], counts['pages'], counts['read'], counts['older']), (2, 3, 5, 1))
+        self.assertEqual(counts['no_code'], ['notes.pdf'])
+        self.assertEqual(counts['unknown'], ['004_PK-9999-99_Not_A_Real_One.pdf'])
+        self.assertEqual(u.build_text([path], library, files)[0], data, 'the same bytes every time')
+
+    def test_the_text_next_to_the_pdfs_goes_up_once(self):
+        self.write_text(self.folder, self.TEXTS)
+        code, out = self.run_main('--dry-run')
+        self.assertEqual(code, 0, out)
+        self.assertIn('PDF text: 2 documents (3 pages) from 5 PDFs', out)
+        rows = self.report()
+        self.assertEqual([r['status'] for r in rows if r['key'] == 'text.json.gz'], ['to upload'])
+        self.assertTrue(any(r['file'] == 'notes.pdf' and r['status'].startswith('text: no code') for r in rows))
+        bucket = FakeBucket()
+        code, out = self.run_main('--bucket', 'test-bucket', client=bucket)
+        self.assertEqual(code, 0, out)
+        stored, kind, _ = bucket.objects['text.json.gz']
+        self.assertEqual(kind, 'application/gzip')
+        self.assertIn('PK-3145-00', json.loads(gzip.decompress(stored))['documents'])
+        self.assertIn('text.json.gz: uploaded', out)
+        bucket.puts.clear()
+        code, out = self.run_main('--bucket', 'test-bucket', client=bucket)
+        self.assertNotIn('text.json.gz', bucket.puts)
+        self.assertIn('text.json.gz: already there', out)
+
+    def test_text_can_be_named_and_goes_up_without_the_pdfs(self):
+        elsewhere = Path(self.tmp.name) / 'elsewhere'
+        elsewhere.mkdir()
+        path = self.write_text(elsewhere, self.TEXTS, 'curriculum_text_9.jsonl.gz')
+        bucket = FakeBucket()
+        code, out = self.run_main('--bucket', 'test-bucket', '--text', str(path), client=bucket, folder=False)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(sorted(bucket.objects), ['library.json', 'text.json.gz'])
+        code, out = self.run_main('--dry-run', '--text', str(elsewhere / 'missing.jsonl.gz'), folder=False)
+        self.assertEqual(code, 2)
+        self.assertIn('Not found', out)
 
     def test_the_keys_are_never_printed_or_reported(self):
         secret = 'sekret-value-1234567890'

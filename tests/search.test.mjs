@@ -5,7 +5,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
-import { buildIndex, search, terms, codeQuery, queryFromReading, docLink, levelRank } from '../public/search.js';
+import { buildIndex, search, terms, codeQuery, queryFromReading, docLink, levelRank, addText, addTextDocs, finishText,
+  findInside } from '../public/search.js';
 
 const sample = JSON.parse(readFileSync(new URL('./sample_library.json', import.meta.url), 'utf8'));
 const index = buildIndex(sample.documents);
@@ -139,4 +140,48 @@ test('real library: filters, levels, and every title finds its document', { skip
     if (!search(realIndex, d.title, { limit: 25 }).some((r) => r.doc.code === d.code)) misses++;
   }
   assert.ok(misses / real.documents.length < 0.02, `${misses} titles did not find their own document`);
+});
+
+// The PDFs' text (made up here, like the sample library).
+const TEXT = {
+  'PK-0186-00': ['Adding Fractions\nName ________', 'Example 1: A bag holds 3 red marbles and 4 blue marbles.\nHow many marbles\nare in the bag?',
+    'Practice\nOne more marble'],
+  'pk-3145-00': ['Slope\nA ramp rises 2 feet for every 5 feet across.'],     // codes are matched in any case
+  'PK-0000-00': ['Not in the library: ignored'],
+};
+
+test("the PDFs' text is searched once it is added, with the page that shows the words", () => {
+  const ix = buildIndex(sample.documents);
+  assert.equal(search(ix, 'marbles in a bag').length, 0, 'not in the library itself');
+  addTextDocs(ix, TEXT, ['PK-0186-00']);
+  assert.equal(search(ix, 'marbles in a bag').length, 0, 'not searched before finishText');
+  addTextDocs(ix, TEXT, ['pk-3145-00', 'PK-0000-00']);
+  assert.equal(finishText(ix), 2);
+  const r = search(ix, 'marbles in a bag', { limit: 5 });
+  assert.deepEqual(r.map((x) => x.doc.code), ['PK-0186-00']);
+  assert.deepEqual([...r[0].inside].sort(), terms('bag marble'));
+  assert.deepEqual(findInside(ix, r[0].doc, r[0].matched),
+    { page: 2, snippet: 'Example 1: A bag holds 3 red marbles and 4 blue marbles. How many marbles are in the bag?' });
+  assert.equal(findInside(ix, r[0].doc, terms('marble')).page, 2, 'the page with the most mentions');
+  assert.equal(findInside(ix, { code: 'PK-3145-00' }, terms('ramp')).page, 1);
+  assert.equal(findInside(ix, { code: 'FO-0023-00' }, terms('marble')), null, 'no text: no page');
+});
+
+test('the text does not change searches the library answers', () => {
+  const ix = buildIndex(sample.documents);
+  addText(ix, TEXT);
+  for (const q of ['adding fractions with unlike denominators', 'slope of a line', 'pk 186', 'counting coins']) {
+    assert.deepEqual(top(ix, q, {}, 1), top(index, q, {}, 1), q);
+  }
+  const r = search(ix, 'adding fractions', { limit: 1 })[0];
+  assert.deepEqual(r.inside, [], 'found in the title: nothing found only inside');
+});
+
+test('a long line is cut to a piece that shows the first searched word', () => {
+  const ix = buildIndex(sample.documents);
+  const long = 'Words '.repeat(40) + 'then the marble appears ' + 'after that more words '.repeat(20);
+  addText(ix, { 'PK-0186-00': [long] });
+  const { snippet } = findInside(ix, { code: 'PK-0186-00' }, terms('marble'));
+  assert.ok(snippet.includes('marble') && snippet.length <= 170, snippet);
+  assert.ok(snippet.startsWith('… ') && snippet.endsWith(' …'), snippet);
 });

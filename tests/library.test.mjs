@@ -1,7 +1,7 @@
 // GET /api/library (lib/library.js) with a stand-in Access team and a stand-in R2 bucket.
 import { test, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { serveLibrary, wantedTag, LIBRARY_KEY } from '../lib/library.js';
+import { serveLibrary, serveText, wantedTag, LIBRARY_KEY, TEXT_KEY } from '../lib/library.js';
 import { servePdf } from '../lib/pdf.js';
 import { forgetKeys } from '../lib/access.js';
 import { makeAccess, ACCESS_ENV } from './access_helper.mjs';
@@ -83,4 +83,25 @@ test('the PDF route cannot be used to reach the library', async () => {
     assert.equal(res.status, 400, name);
   }
   assert.deepEqual(env.CURRICULUM.asked, []);
+});
+
+test("the PDFs' text is served the same way, gzipped as uploaded", async () => {
+  const gz = new Uint8Array([0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 2, 255, 1, 2, 3]);
+  const env = { ...ACCESS_ENV, CURRICULUM: bucket({ [TEXT_KEY]: gz }) };
+  const res = await serveText(await signedIn(), env, fetchImpl);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('content-type'), 'application/gzip');
+  assert.equal(res.headers.get('cache-control'), 'private, no-cache');
+  assert.deepEqual(new Uint8Array(await res.arrayBuffer()), gz);
+  assert.deepEqual(env.CURRICULUM.asked, [[TEXT_KEY, undefined]]);
+  const again = await serveText(await signedIn({ 'if-none-match': `"${ETAG}"` }), env, fetchImpl);
+  assert.equal(again.status, 304);
+  const none = await serveText(await signedIn(), { ...ACCESS_ENV, CURRICULUM: bucket({}) }, fetchImpl);
+  assert.equal(none.status, 404);
+  assert.match((await none.json()).error, /text has not been uploaded/);
+  const anon = await serveText(new Request(url), env, fetchImpl);
+  assert.equal(anon.status, 401);
+  for (const name of ['text.json.gz', 'text']) {
+    assert.equal((await servePdf(await signedIn(), env, name, fetchImpl)).status, 400, name);
+  }
 });

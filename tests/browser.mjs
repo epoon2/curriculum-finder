@@ -2,9 +2,9 @@
   The page in a real browser, against a stand-in of the Cloudflare site:
     node tests/browser.mjs
   Serves public/ with the headers from public/_headers, answers /api/read-image with
-  the real reader and a fake Anthropic reply, and /api/library, /api/pdfs and
-  /api/pdf/<code> from a stand-in bucket holding the made-up tests/sample_library.json
-  and one PDF. Acts as Cloudflare Access by adding
+  the real reader and a fake Anthropic reply, and /api/library, /api/pdfs, /api/text
+  and /api/pdf/<code> from a stand-in bucket holding the made-up
+  tests/sample_library.json, one PDF and some made-up text for it. Acts as Cloudflare Access by adding
   its signed header (tests/access_helper.mjs). Needs Playwright (preinstalled in the Claude sandbox).
 */
 import { createServer } from 'node:http';
@@ -12,9 +12,10 @@ import { readFileSync, existsSync } from 'node:fs';
 import { join, extname, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { gzipSync } from 'node:zlib';
 import { readImage } from '../lib/reader.js';
 import { servePdf, servePdfCodes, pdfKey } from '../lib/pdf.js';
-import { serveLibrary, LIBRARY_KEY } from '../lib/library.js';
+import { serveLibrary, serveText, LIBRARY_KEY, TEXT_KEY } from '../lib/library.js';
 import { makeAccess, ACCESS_ENV } from './access_helper.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -48,22 +49,26 @@ const access = await makeAccess();
 const PDF_BYTES = new TextEncoder().encode('%PDF-1.7 stand-in');
 const LIBRARY_BYTES = readFileSync(join(ROOT, 'tests', 'sample_library.json'));
 const SAMPLE = JSON.parse(LIBRARY_BYTES);
+const TEXT_BYTES = gzipSync(JSON.stringify({ documents: { 'PK-0186-00': ['Adding Fractions',
+  'Example 1: A bag holds 3 red marbles and 4 blue marbles.\nHow many marbles are in the bag?'] } }));
 const pdfBucket = {
   async list() { return { objects: [{ key: pdfKey('PK-0186-00') }], truncated: false }; },
   async head(key) { return key === pdfKey('PK-0186-00') ? { size: PDF_BYTES.length } : null; },
   async get(key) {
     if (key === LIBRARY_KEY) return { size: LIBRARY_BYTES.length, httpEtag: '"v1"', body: new Blob([LIBRARY_BYTES]).stream() };
+    if (key === TEXT_KEY) return { size: TEXT_BYTES.length, httpEtag: '"t1"', body: new Blob([TEXT_BYTES]).stream() };
     return key === pdfKey('PK-0186-00') ? { size: PDF_BYTES.length, body: new Blob([PDF_BYTES]).stream() } : null;
   },
 };
 
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
-  if (url.pathname === '/api/library' || url.pathname === '/api/pdfs' || url.pathname.startsWith('/api/pdf/')) {
+  if (['/api/library', '/api/pdfs', '/api/text'].includes(url.pathname) || url.pathname.startsWith('/api/pdf/')) {
     const request = new Request(url, { method: req.method, headers: { ...req.headers, 'cf-access-jwt-assertion': await access.sign() } });
     const env = { ...ACCESS_ENV, CURRICULUM: pdfBucket };
     const certsOnly = access.fetchWith(async () => { throw new Error('no other fetches'); });
     const answer = url.pathname === '/api/library' ? await serveLibrary(request, env, certsOnly)
+      : url.pathname === '/api/text' ? await serveText(request, env, certsOnly)
       : url.pathname === '/api/pdfs' ? await servePdfCodes(request, env, certsOnly)
       : await servePdf(request, env, decodeURIComponent(url.pathname.slice('/api/pdf/'.length)), certsOnly);
     res.writeHead(answer.status, Object.fromEntries(answer.headers));
@@ -106,9 +111,12 @@ page.on('console', (m) => { if (m.type() === 'error') problems.push(m.text()); }
 await page.goto(base + '/');
 await page.waitForFunction(() => /documents/.test(document.getElementById('libinfo').textContent), null, { timeout: 8000 })
   .catch(async () => { console.log('status:', await page.textContent('#status'), 'problems:', JSON.stringify(problems)); process.exit(1); });
+await page.waitForFunction(() => /searching inside/.test(document.getElementById('libinfo').textContent), null, { timeout: 8000 })
+  .catch(() => {});
 const header = await page.textContent('.sub');
-check('library loads, with the center and system names from it',
-  header === `${SAMPLE.center} · ${SAMPLE.documents.length} documents, exported from ${SAMPLE.platform} on 01/15/2026`, header);
+check('library loads, with the center and system names from it, then the PDF text',
+  header === `${SAMPLE.center} · ${SAMPLE.documents.length} documents, exported from ${SAMPLE.platform} on 01/15/2026` +
+    ' · searching inside 1 PDF', header);
 const direct = (await fetch(base + '/library.json')).status;
 check('the library is not a public file', direct === 404, String(direct));
 check('examples shown before searching', await page.isVisible('#welcome'));
@@ -143,6 +151,18 @@ const pdfLinks = await page.$$eval('#results a', (as) => as.filter((a) => a.text
 check('"Open PDF" only on the card whose PDF is uploaded', JSON.stringify(pdfLinks) === JSON.stringify(['/api/pdf/PK-0186-00']), JSON.stringify(pdfLinks));
 const served = await page.evaluate(async () => { const r = await fetch('/api/pdf/PK-0186-00'); return [r.status, r.headers.get('content-type'), (await r.text()).slice(0, 5)]; });
 check('the link serves the PDF', JSON.stringify(served) === JSON.stringify([200, 'application/pdf', '%PDF-']), JSON.stringify(served));
+
+await page.fill('#q', 'marbles in a bag');
+await page.waitForFunction(() => document.querySelector('#results li .inside'), null, { timeout: 5000 }).catch(() => {});
+const inside = await page.$$eval('#results li', (lis) => lis.map((li) => [li.querySelector('.code').textContent,
+  (li.querySelector('.inside') || {}).textContent || '',
+  [...li.querySelectorAll('a')].map((a) => [a.textContent, a.getAttribute('href')])]));
+check('words only in a PDF find it, with the page and line that matched',
+  inside.length === 1 && inside[0][0] === 'PK-0186-00' && inside[0][1].startsWith('Page 2: Example 1: A bag holds 3 red marbles'),
+  JSON.stringify(inside));
+check('...and Open PDF opens at that page', JSON.stringify(inside[0] && inside[0][2][0]) ===
+  JSON.stringify(['Open PDF at page 2', '/api/pdf/PK-0186-00#page=2']), JSON.stringify(inside[0] && inside[0][2]));
+check('the matched words are marked in that line', (await page.$$('#results li .inside mark')).length >= 3);
 
 // Image search: small PNGs through the file picker, a paste, and several at once.
 const PNG64 = 'iVBORw0KGgoAAAANSUhEUgAAACgAAAAUCAIAAABwJOjsAAAAIklEQVR4nGP4P0CAYdTiUYtHLR61eNTiUYtHLR61eORYDAAP7lcogpD+ZgAAAABJRU5ErkJggg==';
