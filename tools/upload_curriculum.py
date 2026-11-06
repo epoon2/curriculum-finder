@@ -1,8 +1,9 @@
 """Upload the curriculum to the finder's private R2 bucket: library.json and the PDFs.
 
-The finder reads both from the bucket, never from the repo:
+The finder reads them from the bucket, never from the repo:
   library.json         -> library.json    (built by build_library.py; uploaded when it changed)
   each PDF             -> pdf/<code>.pdf  (for example pdf/PK-NF01-00.pdf)
+  the PDFs' text       -> text.json.gz    (from extract_text.py; uploaded when it changed)
 
 A PDF's code comes from its file name, written the way the library writes it:
 "001_PK-NF01-00_Sample_Title_v01.pdf" is PK-NF01-00, "Pk_3102_Sample_Title_v01.pdf"
@@ -30,6 +31,17 @@ Read & Write, that bucket only), in the same PowerShell window:
 
 Only the library changed? Leave out the folder:  python upload_curriculum.py
 
+The PDFs' text (for searching inside them, and opening a PDF at the page that
+matched): run extract_text.py first. Its curriculum_text_*.jsonl.gz files are found
+in the PDF folder or next to it and go up with everything else; or name them:
+
+    python upload_curriculum.py --text "D:\\Curriculum PDFs\\curriculum_text_1.jsonl.gz"
+
+Each text is filed under its document's code, read from its file name exactly as for
+the PDFs (the newest version when a code has several), so the text always belongs to
+the PDF the finder opens. Texts with no code, or a code the library doesn't have, are
+left out (and counted).
+
 The keys are read from the environment only; they're never saved, printed or written
 to the report, and they're gone when the window closes.
 """
@@ -37,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import hashlib
 import json
 import os
@@ -46,6 +59,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 LIBRARY_KEY = 'library.json'
+TEXT_KEY = 'text.json.gz'
+TEXT_FILES = 'curriculum_text_*.jsonl.gz'      # what extract_text.py writes
 # PK-NF01-00, PK_NF21-00, Pk_3102 (no ending: -00), PK 186 (three digits: 0186).
 # After a "-" any ending counts (-00, -TP, -HS); after "_" or a space only numbers and
 # the library's letter endings do, so "Pk_3192_Box_Plots" is PK-3192-00, not -BOX.
@@ -238,16 +253,69 @@ def r2_client():
                         region_name='auto', config=config)
 
 
-def upload_library(client, bucket: str, data: bytes) -> str:
+def upload_whole(client, bucket: str, key: str, data: bytes, content_type: str) -> str:
     """Skipped when the bucket's copy has the same MD5 (R2's etag for a one-part upload)."""
     md5 = hashlib.md5(data).hexdigest()
     try:
-        if client.head_object(Bucket=bucket, Key=LIBRARY_KEY).get('ETag', '').strip('"') == md5:
+        if client.head_object(Bucket=bucket, Key=key).get('ETag', '').strip('"') == md5:
             return 'already there'
     except Exception:
         pass   # not there yet; a real problem shows up in the upload just below
-    client.put_object(Bucket=bucket, Key=LIBRARY_KEY, Body=data, ContentType='application/json; charset=utf-8')
+    client.put_object(Bucket=bucket, Key=key, Body=data, ContentType=content_type)
     return 'uploaded'
+
+
+def upload_library(client, bucket: str, data: bytes) -> str:
+    return upload_whole(client, bucket, LIBRARY_KEY, data, 'application/json; charset=utf-8')
+
+
+def text_files(folder, given) -> list:
+    """The extract_text.py files to use: the ones named with --text, else any in the
+    PDF folder or the folder that holds it."""
+    if given:
+        found = [Path(p).expanduser().resolve() for p in given]
+    else:
+        found = [p for where in ((folder, folder.parent) if folder else ())
+                 for p in sorted(where.glob(TEXT_FILES))]
+    return list(dict.fromkeys(found))
+
+
+def build_text(paths, library, files):
+    """(text.json.gz bytes, counts) from extract_text.py's files: {"documents": {code:
+    [page 1 text, page 2 text, ...]}}, one entry per library code, from that code's
+    newest file (the version the PDF upload picks). Compressed the same way every
+    time, so an unchanged text is not uploaded again."""
+    best, counts = {}, {'read': 0, 'no_code': [], 'unknown': [], 'older': 0, 'unreadable': 0}
+    for path in paths:
+        with gzip.open(path, 'rt', encoding='utf-8') as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                    name, pages = str(record['file']), [str(p) for p in record['text']]
+                except (ValueError, KeyError, TypeError):
+                    counts['unreadable'] += 1
+                    continue
+                counts['read'] += 1
+                code = code_for(name, library, files)
+                if not code:
+                    counts['no_code'].append(name)
+                    continue
+                if library is not None and code not in library:
+                    counts['unknown'].append(name)
+                    continue
+                rank = (version_of(name), -len(str(record.get('path') or name)))
+                if code in best:
+                    counts['older'] += 1
+                    if best[code][0] >= rank:
+                        continue
+                best[code] = (rank, pages)
+    documents = {code: pages for code, (_, pages) in sorted(best.items())}
+    counts['documents'] = len(documents)
+    counts['pages'] = sum(len(p) for p in documents.values())
+    raw = json.dumps({'documents': documents}, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    return gzip.compress(raw, compresslevel=9, mtime=0), counts
 
 
 def upload_one(client, bucket: str, code: str, path: Path, folder: Path) -> str:
@@ -268,6 +336,9 @@ def main(argv=None, client=None) -> int:
     parser.add_argument('folder', nargs='?', help='the folder with the PDFs (subfolders included); leave out to upload only the library')
     parser.add_argument('--bucket', default=os.environ.get('R2_BUCKET', ''), help='the bucket (or set R2_BUCKET)')
     parser.add_argument('--library', default=str(LIBRARY), help='library.json from build_library.py')
+    parser.add_argument('--text', action='append', metavar='FILE',
+                        help="extract_text.py's curriculum_text_N.jsonl.gz (repeat for each); "
+                             'by default any in the PDF folder or next to it')
     parser.add_argument('--dry-run', action='store_true', help='list what would happen; upload nothing')
     args = parser.parse_args(argv)
 
@@ -277,6 +348,11 @@ def main(argv=None, client=None) -> int:
         return 2
     if not args.dry_run and not args.bucket:
         print('Which bucket? Set $env:R2_BUCKET (or give --bucket NAME).')
+        return 2
+    texts = text_files(folder, args.text)
+    missing_text = [p for p in texts if not p.is_file()]
+    if missing_text:
+        print('Not found: ' + ', '.join(str(p) for p in missing_text))
         return 2
     data, library, files = read_library(args.library, with_files=True)
     if data is None:
@@ -289,6 +365,20 @@ def main(argv=None, client=None) -> int:
     if data is not None:
         rows.append(['', LIBRARY_KEY, Path(args.library).name, len(data), 'to upload'])
         print(f'library.json: {len(library)} document codes.')
+    text, text_row = None, None
+    if texts and data is None:
+        print('The PDF text needs library.json too (to file each text under its code); left out.')
+    elif texts:
+        text, counts = build_text(texts, library, files)
+        text_row = ['', TEXT_KEY, ', '.join(p.name for p in texts), len(text), 'to upload']
+        rows.append(text_row)
+        print(f"PDF text: {counts['documents']} documents ({counts['pages']} pages) from {counts['read']} PDFs'"
+              f" text in {len(texts)} file(s); left out: {len(counts['no_code'])} with no code,"
+              f" {len(counts['unknown'])} not in the library, {counts['older']} older versions"
+              + (f", {counts['unreadable']} unreadable lines" if counts['unreadable'] else '') + '.')
+        rows += [['', '', name, '', 'text: no code in the name, and no library document with this file name']
+                 for name in counts['no_code']]
+        rows += [['', '', name, '', 'text: its code is not in the library (left out)'] for name in counts['unknown']]
     chosen, older, no_code, unknown = {}, [], [], []
     if folder:
         chosen, older, no_code = plan(folder, library, files)
@@ -324,6 +414,13 @@ def main(argv=None, client=None) -> int:
                 status, failed = f'failed: {type(exc).__name__}', True
             rows[0][4] = status
             print(f'library.json: {status}.')
+        if text is not None:
+            try:
+                status = upload_whole(client, args.bucket, TEXT_KEY, text, 'application/gzip')
+            except Exception as exc:
+                status, failed = f'failed: {type(exc).__name__}', True
+            text_row[4] = status
+            print(f'{TEXT_KEY}: {status}.')
         if chosen:
             done = {'uploaded': 0, 'already there': 0, 'failed': 0}
             def work(item):
