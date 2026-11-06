@@ -81,6 +81,40 @@ class CodeTest(unittest.TestCase):
         self.assertEqual(u.pdf_key('WOB_PK_Sample_Supplement'),
                          'pdf/WOB_PK_SAMPLE_SUPPLEMENT.pdf')
 
+    def test_short_workout_book_chapter_names(self):
+        docs = [{'code': c, 'type': 'WOB - Chapters', 'file': f, 'title': t} for c, f, t in [
+            ('WCH-007-003', 'WOB_7_Chapter_3.pdf', 'WOB 7 Chapter 3 - Sample'),
+            ('WCH-00A-001', 'WOB_A_Chapter_1.pdf', 'WOB A Chapter 1 - Sample'),
+            ('WCH-N02-004', 'WCH-N02-004_WOB_M2_Chapter_4', 'WOB M2 Chapter 4 - Sample'),
+            ('WCH-010-002', 'WOB_Algebra_Chapter_2', 'WOB Algebra Chapter 2'),
+            ('WCH-00B-002', 'WOB_B_Part_1_Chapter_2.pdf', 'WOB B Part 1 Chapter 2 - Sample'),
+            ('WCH-00B-006', 'WOB_B_Part_2_Chapter_2.pdf', 'WOB B Part 2 Chapter 2 - Sample'),
+            ('WCH-00B-012', 'WOB_B_Part_2_DeskTools.pdf', 'WOB B Part 2 Chapter 8 - Sample - Desktools'),
+            ('WCH-0D1-002', 'WOB_D-Level_1_Chapter_2.pdf', 'WOB D Level 1 Chapter 2 - Sample'),
+            ('WCH-0NF-001', 'WOB_Numerical_Fluency_Chapter_1', 'Numerical Fluency Workout Book Chapter 1'),
+            ('WCH-0PK-003', 'WCH-0PK-003_Preschool_Chapter_3.pdf', 'Preschool Workout Book - Chapter 3'),
+            ('WCH-SAT-005', 'WOB SAT Chapter 5', 'Workout Book SAT Basic Skills Ch 5'),
+            ('PK-0186-00', 'PK-0186-00_Adding_Fractions.pdf', 'Adding Fractions')]]
+        library = {d['code']: d['type'] for d in docs}
+        files = u.by_file_name(docs)
+        for name, code in [
+            ('WOB_7_Ch3_v21.pdf', 'WCH-007-003'),
+            ('WOB_A_Ch1_v04.pdf', 'WCH-00A-001'),
+            ('WOB_M2_Ch4_v07__MIXED_v07_v08.pdf', 'WCH-N02-004'),
+            ('WOB_Alg_Chapter_2_v06.pdf', 'WCH-010-002'),
+            ('WOB_B_Part_1_Ch_2_v12.pdf', 'WCH-00B-002'),
+            ('WOB_B_Part_2_Ch_2_v01.pdf', 'WCH-00B-006'),     # numbered within its part
+            ('WOB_B_Part_2_DT_v01.pdf', 'WCH-00B-012'),
+            ('WOB_D_L1_Pt2_v01.pdf', 'WCH-0D1-002'),
+            ('WOB_NF_Ch_1_v01.pdf', 'WCH-0NF-001'),
+            ('WOB_PK1_Ch3_v08.pdf', 'WCH-0PK-003'),
+            ('WOB_SAT_Basic_Skills_Ch_5_v04.pdf', 'WCH-SAT-005'),
+            ('WOB_7_Ch9_v01.pdf', ''),                         # no such chapter in the library
+            ('WOB_B_Part_3_Ch_1_v01.pdf', ''),
+            ('WOB_Notes_v01.pdf', ''),
+        ]:
+            self.assertEqual(u.code_for(name, library, files), code, name)
+
     @unittest.skipUnless(REAL.is_file(), 'no library.json next to the README')
     def test_every_real_library_file_name_reads_as_its_own_code(self):
         data, library, files = u.read_library(REAL, with_files=True)
