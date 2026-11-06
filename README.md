@@ -204,7 +204,10 @@ number is kept.
 Workout Book files (names starting `WOB`, `WCH` or `Workout`) usually have no code in
 their names, so they're matched to the library by file name: `WOB_7_Chapter_3.pdf` is
 the library document with that file name (case, spaces, punctuation and a `_v02` ending
-don't matter). A WOB or WCH code in the name, like `WCH-007-003`, wins. A Workout Book
+don't matter). Short chapter names work too: `WOB_7_Ch3_v21.pdf` is WCH-007-003,
+`WOB_M2_Ch4` is WCH-N02-004, `WOB_B_Part_2_Ch_1` is the first chapter of Part 2, and
+`WOB_D_L1_Pt2` is WOB D Level 1 Chapter 2. A WOB or WCH code in the name, like
+`WCH-007-003`, wins. A Workout Book
 file whose name isn't in the library shows as **no code in the name, and no library
 document with this file name**; rename it to the file name the library export shows.
 
