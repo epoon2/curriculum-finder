@@ -289,14 +289,17 @@ class UploadTest(unittest.TestCase):
         self.assertNotIn('text.json.gz', bucket.puts)
         self.assertIn('text.json.gz: already there', out)
 
-    def test_text_can_be_named_and_goes_up_without_the_pdfs(self):
+    def test_text_alone_goes_up_without_the_pdfs_or_the_library(self):
         elsewhere = Path(self.tmp.name) / 'elsewhere'
         elsewhere.mkdir()
         path = self.write_text(elsewhere, self.TEXTS, 'curriculum_text_9.jsonl.gz')
         bucket = FakeBucket()
+        bucket.objects['library.json'] = (b'{"documents": [{"code": "NEWER"}]}', 'application/json', {})
         code, out = self.run_main('--bucket', 'test-bucket', '--text', str(path), client=bucket, folder=False)
         self.assertEqual(code, 0, out)
         self.assertEqual(sorted(bucket.objects), ['library.json', 'text.json.gz'])
+        self.assertEqual(bucket.puts, ['text.json.gz'], 'only the text: the library in the bucket is left alone')
+        self.assertIn('used to file the text; not uploaded', out)
         code, out = self.run_main('--dry-run', '--text', str(elsewhere / 'missing.jsonl.gz'), folder=False)
         self.assertEqual(code, 2)
         self.assertIn('Not found', out)
