@@ -37,6 +37,10 @@ in the PDF folder or next to it and go up with everything else; or name them:
 
     python upload_curriculum.py --text "D:\\Curriculum PDFs\\curriculum_text_1.jsonl.gz"
 
+With --text and no PDF folder, only the text goes up: library.json is used to file the
+text under its codes but is not uploaded, so an older copy can never replace the
+finder's library.
+
 Each text is filed under its document's code, read from its file name exactly as for
 the PDFs (the newest version when a code has several), so the text always belongs to
 the PDF the finder opens. Texts with no code, or a code the library doesn't have, are
@@ -362,9 +366,13 @@ def main(argv=None, client=None) -> int:
             return 2
 
     rows = []
+    # --text without a folder: the text only. The library just files it under its codes.
+    send_library = data is not None and not (args.text and not folder)
     if data is not None:
-        rows.append(['', LIBRARY_KEY, Path(args.library).name, len(data), 'to upload'])
-        print(f'library.json: {len(library)} document codes.')
+        rows.append(['', LIBRARY_KEY, Path(args.library).name, len(data),
+                     'to upload' if send_library else 'not uploaded (only the text, with --text)'])
+        print(f'library.json: {len(library)} document codes'
+              + ('.' if send_library else ' (used to file the text; not uploaded).'))
     text, text_row = None, None
     if texts and data is None:
         print('The PDF text needs library.json too (to file each text under its code); left out.')
@@ -407,7 +415,7 @@ def main(argv=None, client=None) -> int:
     failed = False
     if not args.dry_run:
         client = client or r2_client()
-        if data is not None:
+        if send_library:
             try:
                 status = upload_library(client, args.bucket, data)
             except Exception as exc:
