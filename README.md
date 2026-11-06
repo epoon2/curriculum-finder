@@ -252,7 +252,9 @@ too, so they stay out of git. The next `upload_curriculum.py "D:\Curriculum PDFs
 finds them there and uploads `text.json.gz`: each PDF's pages filed under the code its
 PDF goes up as (the newest version when a code has several), skipping texts with no
 code or a code the library doesn't have, which the summary and the report count. Or
-upload just the text: `python upload_curriculum.py --text "D:\Curriculum PDFs\curriculum_text_1.jsonl.gz"`.
+upload just the text: `python upload_curriculum.py --text "D:\Curriculum PDFs\curriculum_text_1.jsonl.gz"`
+(with `--text` and no PDF folder, `library.json` only files the text under its codes and
+is not uploaded, so an older copy can't replace the finder's library).
 Run `extract_text.py` again after adding PDFs. Scanned PDFs (pictures with no text) are
 listed by `extract_text.py` and can't be searched inside.
 
