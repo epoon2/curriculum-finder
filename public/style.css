@@ -65,6 +65,8 @@ button.link { border: 0; background: none; padding: 0; color: var(--accent); cur
 .skills { margin: 6px 0 0; }
 .tags { margin: 6px 0 0; display: flex; gap: 6px; flex-wrap: wrap; }
 .tag { font-size: .8rem; background: var(--chip); border-radius: 999px; padding: 2px 9px; }
+.inside { margin: 6px 0 0; font-size: .92rem; border-left: 3px solid var(--line); padding-left: 8px; overflow-wrap: anywhere; }
+.inside .page { color: var(--muted); font-weight: 600; }
 .actions { margin: 8px 0 0; display: flex; gap: 16px; flex-wrap: wrap; font-size: .92rem; }
 .actions a { color: var(--accent); }
 .muted { color: var(--muted); }

@@ -9,9 +9,15 @@
   fractions many times. Word families are folded together ("dividing",
   "division", "quotient" all count as divide) so staff don't need the library's
   exact wording.
+
+  Once the PDFs' text has loaded (addText), each document's text is one more field,
+  with its own word statistics, so a search also finds the words on the pages
+  themselves (an example problem's wording, say). findInside then says which page
+  matched best, with the line that shows it.
 */
 
 const FIELDS = { title: 3, skills: 2, keywords: 2, tags: 2.5, file: 1 };
+const TEXT_WEIGHT = 0.5;
 const K1 = 1.2, B = 0.6;
 
 const STOP = new Set(('a an the of and or to in on for with by from is are be how what which ' +
@@ -147,6 +153,106 @@ function idf(index, t) {
   return Math.log(1 + (index.n - n + 0.5) / (n + 0.5));
 }
 
+/* --- the PDFs' text -------------------------------------------------------------- */
+
+function countTerms(texts) {
+  const c = new Map();
+  let len = 0;
+  for (const text of texts) for (const t of terms(text)) { c.set(t, (c.get(t) || 0) + 1); len++; }
+  return { c, len };
+}
+
+function byCode(index) {
+  if (!index.byCode) index.byCode = new Map(index.docs.map((x) => [String(x.doc.code).toUpperCase(), x]));
+  return index.byCode;
+}
+
+/**
+ * Give some documents their PDF's text: `pages` is {code: [page 1 text, ...]} (from
+ * /api/text), `codes` the ones to do now, so a big library can be added a batch at a
+ * time without freezing the page. Codes the library doesn't have are ignored. The
+ * text is searched only after finishText.
+ */
+export function addTextDocs(index, pages, codes = Object.keys(pages)) {
+  const docs = byCode(index);
+  for (const code of codes) {
+    const x = docs.get(String(code).toUpperCase());
+    const list = pages[code];
+    if (!x || !Array.isArray(list)) continue;
+    x.pages = list.map((p) => String(p || ''));
+    x.text = countTerms(x.pages);
+  }
+}
+
+/** The text's word statistics; after this, searches use it. Returns how many documents have text. */
+export function finishText(index) {
+  const withText = index.docs.filter((x) => x.text);
+  const df = new Map();
+  for (const x of withText) for (const t of x.text.c.keys()) df.set(t, (df.get(t) || 0) + 1);
+  index.textN = withText.length;
+  index.textAvg = withText.reduce((s, x) => s + x.text.len, 0) / Math.max(1, withText.length) || 1;
+  index.textDf = withText.length ? df : null;
+  return withText.length;
+}
+
+/** addTextDocs and finishText in one go. */
+export function addText(index, pages) {
+  addTextDocs(index, pages);
+  return finishText(index);
+}
+
+function textScore(index, x, t) {
+  const tf = x.text && x.text.c.get(t);
+  if (!tf || !index.textDf) return 0;
+  const n = index.textDf.get(t) || 0;
+  const norm = tf * (K1 + 1) / (tf + K1 * (1 - B + B * x.text.len / index.textAvg));
+  return TEXT_WEIGHT * norm * Math.log(1 + (index.textN - n + 0.5) / (n + 0.5));
+}
+
+/**
+ * The page of a document's PDF that best shows the searched words (the most of
+ * them, then the most mentions, then the earliest), and a short piece of it:
+ * { page: 1-based, snippet }. null when the document has no text or none of the words.
+ */
+export function findInside(index, doc, words) {
+  const x = byCode(index).get(String(doc.code).toUpperCase());
+  const want = new Set(words);
+  if (!x || !x.pages || !want.size) return null;
+  let best = null;
+  x.pages.forEach((text, i) => {
+    const hits = terms(text).filter((t) => want.has(t));
+    const kinds = new Set(hits).size;
+    if (kinds && (!best || kinds > best.kinds || (kinds === best.kinds && hits.length > best.hits))) {
+      best = { page: i + 1, kinds, hits: hits.length, text };
+    }
+  });
+  return best ? { page: best.page, snippet: snippet(best.text, want) } : null;
+}
+
+const SNIPPET = 160;
+
+// The line with the most of the words, with the lines after it while short.
+function snippet(text, want) {
+  const lines = String(text).split('\n').map((l) => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
+  let at = 0, most = -1;
+  lines.forEach((line, i) => {
+    const n = new Set(terms(line).filter((t) => want.has(t))).size;
+    if (n > most) { most = n; at = i; }
+  });
+  let out = lines[at] || '';
+  for (let i = at + 1; i < lines.length && out.length < 100; i++) out += ' ' + lines[i];
+  if (out.length > SNIPPET) {
+    // Keep the first searched word in view.
+    const words = out.split(' ');
+    const first = Math.max(0, words.findIndex((w) => terms(w).some((t) => want.has(t))));
+    let start = 0;
+    while (start < first && words.slice(start, first + 1).join(' ').length > SNIPPET / 2) start++;
+    out = (start ? '… ' : '') + words.slice(start).join(' ');
+    if (out.length > SNIPPET) out = out.slice(0, SNIPPET).replace(/\s+\S*$/, '') + ' …';
+  }
+  return out;
+}
+
 /**
  * Search. `query` is plain words or a code. `options`:
  *   types:  only these document types (empty = all)
@@ -155,7 +261,8 @@ function idf(index, t) {
  *   boostTags: tags that earn a bonus without filtering (from the image reader)
  *   limit:  how many results (default 30)
  *   minRelative: drop results scoring under this share of the best one (default 0.2)
- * Returns [{ doc, score, matched: [terms found] }], best first.
+ * Returns [{ doc, score, matched: [terms found], inside: [those found only in the
+ * PDF's text] }], best first.
  */
 export function search(index, query, options = {}) {
   const { types = [], tag = '', level = '', boostTags = [], limit = 30, minRelative = 0.2 } = options;
@@ -185,7 +292,7 @@ export function search(index, query, options = {}) {
   for (const x of index.docs) {
     if (!keep(x.doc)) continue;
     let score = 0;
-    const matched = [];
+    const matched = [], inside = [];
     for (const t of wanted) {
       let termScore = 0;
       for (const [name, weight] of Object.entries(FIELDS)) {
@@ -195,9 +302,11 @@ export function search(index, query, options = {}) {
         const norm = tf * (K1 + 1) / (tf + K1 * (1 - B + B * f.len / index.avg[name]));
         termScore += weight * norm;
       }
-      if (termScore) {
-        score += termScore * idf(index, t);
+      const inText = x.text ? textScore(index, x, t) : 0;
+      if (termScore || inText) {
+        score += termScore * idf(index, t) + inText;
         matched.push(t);
+        if (!termScore) inside.push(t);
       }
     }
     if (!score) continue;
@@ -212,7 +321,7 @@ export function search(index, query, options = {}) {
       score *= 1 + 0.5 / (1 + extra);
     }
     if ((x.doc.tags || []).some((t) => boost.has(t.toLowerCase()))) score *= 1.25;
-    results.push({ doc: x.doc, score, matched });
+    results.push({ doc: x.doc, score, matched, inside });
   }
   results.sort((a, b) => b.score - a.score || a.doc.code.localeCompare(b.doc.code));
   // Drop the long tail that only shares a common word with the search.

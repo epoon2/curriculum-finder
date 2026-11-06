@@ -1,11 +1,13 @@
 /*
   The Curriculum Finder page: loads the library from /api/library (private, staff
   sign-in only), searches it as you type, and turns pictures (chosen, pasted or
-  dropped) into a search through /api/read-image. Everything is built with
-  textContent, never innerHTML, so nothing in the library or the reader's reply can
-  run as code here.
+  dropped) into a search through /api/read-image. After the library, it loads the
+  PDFs' text from /api/text (if it has been uploaded) to search inside the PDFs too;
+  a card found that way shows the page and the line that matched, and Open PDF
+  opens at that page. Everything is built with textContent, never innerHTML, so
+  nothing in the library, the PDFs' text or the reader's reply can run as code here.
 */
-import { buildIndex, search, terms, queryFromReadings, docLink } from './search.js';
+import { buildIndex, search, terms, queryFromReadings, docLink, addTextDocs, finishText, findInside } from './search.js';
 
 const PAGE = 25;
 const MAX_EDGE = 2000;           // images are shrunk to this long edge before upload
@@ -28,7 +30,8 @@ const el = (tag, attrs = {}, ...children) => {
 };
 
 const state = { index: null, results: [], shown: 0, boostTags: [], pdfs: new Set(),
-  platform: 'the curriculum system', docUrl: '' };
+  platform: 'the curriculum system', docUrl: '', textDocs: 0 };
+const TEXT_BATCH = 40;           // documents' text indexed per step, so typing stays smooth
 
 async function loadLibrary() {
   const res = await fetch('api/library', { credentials: 'same-origin' });
@@ -62,6 +65,29 @@ async function loadPdfCodes() {
   const had = state.shown;              // redraw the cards already showing, now with the links
   state.shown = 0;
   do render(); while (state.shown < had && state.shown < state.results.length);
+}
+
+// The PDFs' text, gzipped (/api/text), unzipped here and added to the index a batch at
+// a time. Without it (not uploaded yet, an old browser, a dropped sign-in) the page
+// simply searches the library as before.
+async function loadText() {
+  if (typeof DecompressionStream !== 'function' || !state.index) return;
+  try {
+    const res = await fetch('api/text', { credentials: 'same-origin' });
+    if (!res.ok || !res.body || (res.headers.get('content-type') || '').includes('html')) return;
+    const unzipped = new Response(res.body.pipeThrough(new DecompressionStream('gzip')));
+    const pages = (await unzipped.json()).documents;
+    if (!pages || typeof pages !== 'object') return;
+    const codes = Object.keys(pages);
+    for (let i = 0; i < codes.length; i += TEXT_BATCH) {
+      addTextDocs(state.index, pages, codes.slice(i, i + TEXT_BATCH));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    state.textDocs = finishText(state.index);
+  } catch { return; }
+  if (!state.textDocs) return;
+  $('libinfo').append(` · searching inside ${state.textDocs.toLocaleString()} PDF${state.textDocs === 1 ? '' : 's'}`);
+  if ($('q').value.trim()) run();       // the search showing now, with the text too
 }
 
 function setUpFilters() {
@@ -115,8 +141,7 @@ function render() {
   const list = $('results');
   if (state.shown === 0) list.replaceChildren();
   const next = state.results.slice(state.shown, state.shown + PAGE);
-  const matched = (r) => new Set(r.matched);
-  for (const r of next) list.append(card(r.doc, matched(r)));
+  for (const r of next) list.append(card(r));
   state.shown += next.length;
   $('more').hidden = state.shown >= state.results.length;
 }
@@ -131,7 +156,11 @@ function marked(text, matched) {
   return frag;
 }
 
-function card(doc, matched) {
+function card(result) {
+  const doc = result.doc;
+  const matched = new Set(result.matched);
+  // Found (partly) in the PDF's own words: which page, and the line that shows it.
+  const found = (result.inside || []).length ? findInside(state.index, doc, result.matched) : null;
   const link = docLink(doc, state.docUrl);
   const testPrep = /-TP$/.test(doc.code);
   const meta = [TYPE_LABELS[doc.type] || doc.type, doc.level, doc.pages ? `${doc.pages} page${doc.pages === 1 ? '' : 's'}` : '',
@@ -149,10 +178,15 @@ function card(doc, matched) {
     el('p', { class: 'meta' }, meta),
     doc.skills ? el('p', { class: 'skills' }, marked(doc.skills, matched)) : null,
     (doc.tags || []).length ? el('p', { class: 'tags' }, ...doc.tags.map((t) => el('span', { class: 'tag' }, t))) : null,
+    found ? el('p', { class: 'inside' }, el('span', { class: 'page' }, `Page ${found.page}:`), ' ',
+      marked(found.snippet, matched)) : null,
     el('p', { class: 'actions' },
-      // The PDF from the finder's private storage (/api/pdf/<code>, staff sign-in only).
+      // The PDF from the finder's private storage (/api/pdf/<code>, staff sign-in only),
+      // at the page that matched when the search found it inside (#page= is the
+      // browser's own PDF viewer's way to open at a page).
       state.pdfs.has(String(doc.code).toUpperCase())     // the bucket's keys are upper case
-        ? el('a', { href: '/api/pdf/' + encodeURIComponent(doc.code), target: '_blank', rel: 'noopener' }, 'Open PDF') : null,
+        ? el('a', { href: '/api/pdf/' + encodeURIComponent(doc.code) + (found ? `#page=${found.page}` : ''),
+          target: '_blank', rel: 'noopener' }, found ? `Open PDF at page ${found.page}` : 'Open PDF') : null,
       link ? el('a', { href: link, target: '_blank', rel: 'noopener noreferrer' }, `Open in ${state.platform}`)
         : el('span', { class: 'muted' }, `Look up ${doc.code} in ${state.platform}`),
       copy));
@@ -380,7 +414,7 @@ function wire() {
 
 wire();
 loadPdfCodes();
-loadLibrary().then(() => { $('q').focus(); run(); }).catch((err) => {
+loadLibrary().then(() => { $('q').focus(); run(); loadText(); }).catch((err) => {
   $('libinfo').textContent = 'library not loaded';
   $('status').textContent = err.message;
 });
