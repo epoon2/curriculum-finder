@@ -3,7 +3,9 @@
 A private search page for a tutoring center's curriculum library. Instructors type a
 topic, a skill or a document code ("adding fractions", "slope", "PK 186"), or upload a
 photo of notes or an example problem, and get the matching worksheets with their
-codes, levels and page counts. **Open PDF** opens the worksheet itself, on any device.
+codes, levels and page counts. It also searches the words inside the PDFs (an example
+problem's wording, say), showing the page and the line that matched. **Open PDF** opens
+the worksheet itself, on any device, at that page when the search found it inside.
 
 **This repo is only the code.** The curriculum (the library catalog and the PDFs) is
 licensed to the center, so none of it is here: it lives in a private Cloudflare R2
@@ -29,6 +31,7 @@ staff browser ──► Cloudflare Access (email + one-time code)
                   ├─ public/          the page: HTML, JS, CSS (no curriculum in it)
                   └─ functions/api/
                        ├─ library      GET  library.json ─┐
+                       ├─ text         GET  the PDFs' text┤
                        ├─ pdfs         GET  which codes have a PDF
                        ├─ pdf/<code>   GET  one PDF ──────┼──► private R2 bucket
                        └─ read-image   POST a photo ──► Workers AI (or Anthropic API)
@@ -40,6 +43,14 @@ staff browser ──► Cloudflare Access (email + one-time code)
   ranked by how many of the searched words a document covers. Word families are
   folded together ("dividing", "division" and "quotient" all count as divide), so
   staff don't need the library's exact wording.
+- **Then the PDFs' text.** Right after the library, the page loads the text pulled out
+  of the PDFs (`text.json.gz`, about 1.6 MB gzipped for about 900 PDFs, cached the same
+  way), unzips it itself (the browser's `DecompressionStream`) and adds it to the search
+  a batch at a time, so typing never waits for it. It is one more field with its own
+  word statistics and a light weight (0.5, against the title's 3), so it rarely reorders searches the
+  library already answers, and finds pages for words only the PDFs have. Without it
+  (not uploaded yet, or a browser too old to unzip) the page searches the library as
+  before.
 - **Every server route checks the sign-in itself.** Access sits in front of the site,
   and on top of that each route verifies the Access token (its RS256 signature
   against the team's public keys, its audience and its expiry; `lib/access.js`)
@@ -61,14 +72,15 @@ staff browser ──► Cloudflare Access (email + one-time code)
 | `public/search.js` | The search (word families, BM25 ranking, code lookup) |
 | `public/_headers` | Security headers: the page can only talk to its own site, can't be framed, isn't indexed |
 | `functions/api/library.js` | `GET /api/library`: the library, from the bucket |
+| `functions/api/text.js` | `GET /api/text`: the PDFs' text, from the bucket (served gzipped, as uploaded) |
 | `functions/api/pdfs.js` | `GET /api/pdfs`: which codes have a PDF, so only those cards get the link |
 | `functions/api/pdf/[code].js` | `GET /api/pdf/<code>`: one PDF, with byte ranges for the browser's viewer |
 | `functions/api/read-image.js` | `POST /api/read-image`: the image reader |
 | `lib/access.js` | Verifies the Cloudflare Access sign-in token, for every route |
-| `lib/library.js`, `lib/pdf.js`, `lib/reader.js` | What the routes do |
+| `lib/library.js`, `lib/pdf.js`, `lib/reader.js` | What the routes do (`lib/library.js` serves both the library and the text) |
 | `tools/build_library.py` | Turns the curriculum system's library export (.xlsx) into `library.json` |
 | `tools/upload_curriculum.py` | Uploads `library.json` and the PDFs from the center's computer to the bucket |
-| `tools/extract_text.py` | Pulls the text out of the PDFs, for searching inside them later |
+| `tools/extract_text.py` | Pulls the text out of the PDFs, for searching inside them (run on the center's computer) |
 | `tests/` | Unit tests, a browser test, and the made-up sample library |
 
 There is no build step and nothing to install to run the site.
@@ -225,15 +237,35 @@ It uploads `library.json`, then the PDFs as `pdf/<code>.pdf`, printing progress 
 100 files and a total. Run it again any time: anything already in the bucket is
 skipped, so only new or changed files go up.
 
+**The PDFs' text (for searching inside them).** Put `extract_text.py` in the same
+folder, then:
+
+```
+python -m pip install pymupdf
+python extract_text.py "D:\Curriculum PDFs"
+```
+
+It reads every PDF (a zip of them works too), prints a line every 100, and writes
+`curriculum_text_1.jsonl.gz` (and `_2`, `_3` when needed) into the PDF folder (next to
+the zip for a zip). It changes nothing and sends nothing. These files are curriculum
+too, so they stay out of git. The next `upload_curriculum.py "D:\Curriculum PDFs"`
+finds them there and uploads `text.json.gz`: each PDF's pages filed under the code its
+PDF goes up as (the newest version when a code has several), skipping texts with no
+code or a code the library doesn't have, which the summary and the report count. Or
+upload just the text: `python upload_curriculum.py --text "D:\Curriculum PDFs\curriculum_text_1.jsonl.gz"`.
+Run `extract_text.py` again after adding PDFs. Scanned PDFs (pictures with no text) are
+listed by `extract_text.py` and can't be searched inside.
+
 **e. Check it's private (signed out)**
 
 In a private window, with no sign-in, each of these must show the Cloudflare Access
 sign-in screen, never the library, a list or a PDF:
 
 - `https://<project>.pages.dev/api/library`
+- `https://<project>.pages.dev/api/text`
 - `https://<project>.pages.dev/api/pdfs`
 - `https://<project>.pages.dev/api/pdf/<any code you uploaded>`
-- the same three on a preview address (**Deployments →** an older one → its
+- the same four on a preview address (**Deployments →** an older one → its
   `https://<id>.<project>.pages.dev` link), and on any custom domain
 
 Or in PowerShell: `curl.exe -sI https://<project>.pages.dev/api/library` should answer
@@ -278,8 +310,15 @@ and nothing is redeployed.
   everything that matches, in code order.
 - Image search turns the reading into words and gives a small boost to the topics the
   reader named. Clicking one of the skill chips searches that skill alone.
+- Words that are only inside a PDF (an example problem's wording, a name in a word
+  problem) find it once the PDFs' text is uploaded. The card then shows **Page N:** and
+  the line that matched, and its **Open PDF at page N** link opens there (in the
+  browser's own PDF viewer on a computer; phone browsers open the PDF at its start).
+  The page shown is the one with the most of the searched words, then the most
+  mentions.
 - Search can only be as good as the export: documents with no tags, skills or keywords
-  are found by title only. `build_library.py` prints how many there are.
+  are found by title only, unless their PDF's text is uploaded. `build_library.py`
+  prints how many there are.
 
 ## Costs
 
@@ -312,7 +351,8 @@ and nothing is redeployed.
 - Every route verifies the Access sign-in token itself before reading the bucket or
   running a model (see How it works).
 - The bucket has no public address. The PDF route looks up only document codes and
-  answers `noindex`; the library route answers only `library.json`.
+  answers `noindex`; the library and text routes answer only `library.json` and
+  `text.json.gz`.
 - `public/_headers` stops the page from contacting any other site, keeps it out of
   search engines and blocks other sites from framing it.
 - Bindings and settings are for Production only, so a preview deployment (for
@@ -326,6 +366,6 @@ python3 -m unittest discover tests    # the uploader, with a stand-in bucket
 npm run browser-test                  # the page in a real browser (needs Playwright)
 ```
 
-They run on `tests/sample_library.json`, a made-up library in the export's format. A
-real `library.json` placed next to this README (it's ignored by git) adds a few
-checks against it.
+They run on `tests/sample_library.json`, a made-up library in the export's format, and
+a few lines of made-up PDF text. A real `library.json` placed next to this README (it's
+ignored by git) adds a few checks against it.
